@@ -82,6 +82,7 @@ public class FPEConstants {
             String chineseChar = String.valueOf((char) code);
             sb.append(chineseChar);
         }
+        sb.append("—_@()*&^%$");
         return sb.toString();
     }
     

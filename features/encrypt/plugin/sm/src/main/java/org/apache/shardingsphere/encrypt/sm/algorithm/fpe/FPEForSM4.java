@@ -103,70 +103,155 @@ public class FPEForSM4 {
     private int letter2num(char character) {
         return character - 96 > 0 ? character - 96 : character - 64;
     }
-    
-    public String encrypt(String data) {
-        if (null == data) {
-            return null;
-        } else {
-            try {
-                boolean isNumeric = "0123456789".equals(numberMapperStr);
-                if (isNumeric && data.length() > 1) {
-                    // 首位用1-9做简单加密
-                    String firstDigitSet = numberMapperStr.substring(1); // "123456789"
-                    char firstChar = data.charAt(0);
-                    int iFirst = firstDigitSet.indexOf(firstChar);
-                    if (iFirst == -1)
-                        iFirst = 0; // 容错
-                    int jFirst = (sortCode) % firstDigitSet.length();
-                    int index = (iFirst + jFirst) % firstDigitSet.length();
-                    char encFirst = firstDigitSet.charAt(index);
-                    // 剩余部分走原有逻辑
-                    String rest = data.substring(1);
-                    String encRest;
-                    if (rest.length() == 0) {
-                        encRest = "";
-                    } else if (rest.length() < 2 || Math.pow(this.mapper.getRadix(), rest.getBytes(StandardCharsets.UTF_8).length) < 1000000) {
-                        List<String> list = toList(rest);
-                        StringBuilder encrypt = new StringBuilder();
-                        for (int idx = 0; idx < list.size(); idx++) {
-                            String s = list.get(idx);
-                            int i = numberMapperStr.indexOf(s);
-                            int j = (sortCode + idx + 1) % numberMapperStr.length(); // idx+1保证扰动不和首位重复
-                            int idxEnc = (i + j) % numberMapperStr.length();
-                            encrypt.append(numberMapperStr.charAt(idxEnc));
-                        }
-                        encRest = encrypt.toString();
-                    } else {
-                        List<String> plainValues = checkArgs(this.mapper.getRadix(), rest);
-                        StringBuilder encryptedText = new StringBuilder();
-                        for (String plainValue : plainValues) {
-                            encryptedText.append(new String(encrypt(plainValue.toCharArray())));
-                        }
-                        encRest = encryptedText.toString();
-                    }
-                    return encFirst + encRest;
+
+    private String getEncryptDate(String data){
+        boolean isNumeric = "0123456789".equals(numberMapperStr);
+        if (isNumeric && data.length() > 1) {
+            // 首位用1-9做简单加密
+            String firstDigitSet = numberMapperStr.substring(1); // "123456789"
+            char firstChar = data.charAt(0);
+            int iFirst = firstDigitSet.indexOf(firstChar);
+            if (iFirst == -1)
+                iFirst = 0; // 容错
+            int jFirst = (sortCode) % firstDigitSet.length();
+            int index = (iFirst + jFirst) % firstDigitSet.length();
+            char encFirst = firstDigitSet.charAt(index);
+            // 剩余部分走原有逻辑
+            String rest = data.substring(1);
+            String encRest;
+            if (rest.isEmpty()) {
+                encRest = "";
+            } else if (rest.length() < 2 || Math.pow(this.mapper.getRadix(), rest.getBytes(StandardCharsets.UTF_8).length) < 1000000) {
+                List<String> list = toList(rest);
+                StringBuilder encrypt = new StringBuilder();
+                for (int idx = 0; idx < list.size(); idx++) {
+                    String s = list.get(idx);
+                    int i = numberMapperStr.indexOf(s);
+                    int j = (sortCode + idx + 1) % numberMapperStr.length(); // idx+1保证扰动不和首位重复
+                    int idxEnc = (i + j) % numberMapperStr.length();
+                    encrypt.append(numberMapperStr.charAt(idxEnc));
                 }
-                // 非数字集或长度为1，走原有逻辑
-                if (data.length() < 2 || Math.pow(this.mapper.getRadix(), data.getBytes(StandardCharsets.UTF_8).length) < 1000000) {
-                    List<String> list = toList(data);
-                    StringBuilder encrypt = new StringBuilder();
-                    for (int idx = 0; idx < list.size(); idx++) {
-                        String s = list.get(idx);
-                        int i = numberMapperStr.indexOf(s);
-                        int j = (sortCode + idx) % numberMapperStr.length(); // 每位扰动
-                        int index = (i + j) % numberMapperStr.length();
-                        encrypt.append(numberMapperStr.charAt(index));
-                    }
-                    return encrypt.toString();
-                }
-                List<String> plainValues = checkArgs(this.mapper.getRadix(), data);
+                encRest = encrypt.toString();
+            } else {
+                List<String> plainValues = checkArgs(this.mapper.getRadix(), rest);
                 StringBuilder encryptedText = new StringBuilder();
                 for (String plainValue : plainValues) {
                     encryptedText.append(new String(encrypt(plainValue.toCharArray())));
                 }
-                return encryptedText.toString();
+                encRest = encryptedText.toString();
+            }
+            return encFirst + encRest;
+        }
+        // 非数字集或长度为1，走原有逻辑
+        if (data.length() < 2 || Math.pow(this.mapper.getRadix(), data.getBytes(StandardCharsets.UTF_8).length) < 1000000) {
+            List<String> list = toList(data);
+            StringBuilder encrypt = new StringBuilder();
+            for (int idx = 0; idx < list.size(); idx++) {
+                String s = list.get(idx);
+                int i = numberMapperStr.indexOf(s);
+                int j = (sortCode + idx) % numberMapperStr.length(); // 每位扰动
+                int index = (i + j) % numberMapperStr.length();
+                encrypt.append(numberMapperStr.charAt(index));
+            }
+            return encrypt.toString();
+        }
+        List<String> plainValues = checkArgs(this.mapper.getRadix(), data);
+        StringBuilder encryptedText = new StringBuilder();
+        for (String plainValue : plainValues) {
+            encryptedText.append(new String(encrypt(plainValue.toCharArray())));
+        }
+        return encryptedText.toString();
+    }
+
+    private String getDecryptData(String data){
+        boolean isNumeric = "0123456789".equals(numberMapperStr);
+        if (isNumeric && data.length() > 1) {
+            // 首位用1-9做简单解密
+            String firstDigitSet = numberMapperStr.substring(1); // "123456789"
+            char firstChar = data.charAt(0);
+            int iFirst = firstDigitSet.indexOf(firstChar);
+            if (iFirst == -1)
+                iFirst = 0; // 容错
+            int jFirst = (sortCode) % firstDigitSet.length();
+            int index = iFirst - jFirst;
+            if (index < 0) {
+                index = (firstDigitSet.length() + index) % firstDigitSet.length();
+            }
+            char decFirst = firstDigitSet.charAt(index);
+            // 剩余部分走原有逻辑
+            String rest = data.substring(1);
+            String decRest;
+            if (rest.length() == 0) {
+                decRest = "";
+            } else if (rest.length() < 2 || Math.pow(this.mapper.getRadix(), rest.getBytes(StandardCharsets.UTF_8).length) < 1000000) {
+                List<String> list = toList(rest);
+                StringBuilder decrypt = new StringBuilder();
+                for (int idx = 0; idx < list.size(); idx++) {
+                    String s = list.get(idx);
+                    int j = (sortCode + idx + 1) % numberMapperStr.length();
+                    int i = numberMapperStr.indexOf(s);
+                    int idxDec = i - j;
+                    if (idxDec < 0) {
+                        idxDec = (numberMapperStr.length() + idxDec) % numberMapperStr.length();
+                    }
+                    decrypt.append(numberMapperStr.charAt(idxDec));
+                }
+                decRest = decrypt.toString();
+            } else {
+                List<String> plainValues = checkArgs(this.mapper.getRadix(), rest);
+                StringBuilder decryptedText = new StringBuilder();
+                for (String plainValue : plainValues) {
+                    decryptedText.append(new String(decrypt(plainValue.toCharArray())));
+                }
+                decRest = decryptedText.toString();
+            }
+            return decFirst + decRest;
+        }
+        // 非数字集或长度为1，走原有逻辑
+        if (data.length() < 2 || Math.pow(this.mapper.getRadix(), data.getBytes(StandardCharsets.UTF_8).length) < 1000000) {
+            List<String> list = toList(data);
+            StringBuilder decrypt = new StringBuilder();
+            for (int idx = 0; idx < list.size(); idx++) {
+                String s = list.get(idx);
+                int j = (sortCode + idx) % numberMapperStr.length();
+                int i = numberMapperStr.indexOf(s);
+                int index = i - j;
+                if (index < 0) {
+                    index = (numberMapperStr.length() + index) % numberMapperStr.length();
+                }
+                decrypt.append(numberMapperStr.charAt(index));
+            }
+            return decrypt.toString();
+        }
+        List<String> plainValues = checkArgs(this.mapper.getRadix(), data);
+        StringBuilder decryptedText = new StringBuilder();
+        for (String plainValue : plainValues) {
+            decryptedText.append(new String(decrypt(plainValue.toCharArray())));
+        }
+        return decryptedText.toString();
+    }
+
+    public String encrypt(String data) {
+        String encryptData = "";
+        if (null == data) {
+            return null;
+        } else {
+            String[] s = null;
+            try {
+                if (data.contains(" ")){
+                    s = data.split(" ");
+                }
+                if (s != null){
+                    for (String string : s) {
+                       encryptData += getEncryptDate(string);
+                       encryptData += " ";
+                    }
+                    encryptData = encryptData.trim();
+                }
+                return encryptData.isEmpty() ? getEncryptDate(data) : encryptData;
+
             } catch (Exception e) {
-                e.printStackTrace();
+//                e.printStackTrace();
                 return data;
             }
         }
@@ -191,71 +276,16 @@ public class FPEForSM4 {
             return null;
         } else {
             try {
-                boolean isNumeric = "0123456789".equals(numberMapperStr);
-                if (isNumeric && data.length() > 1) {
-                    // 首位用1-9做简单解密
-                    String firstDigitSet = numberMapperStr.substring(1); // "123456789"
-                    char firstChar = data.charAt(0);
-                    int iFirst = firstDigitSet.indexOf(firstChar);
-                    if (iFirst == -1)
-                        iFirst = 0; // 容错
-                    int jFirst = (sortCode) % firstDigitSet.length();
-                    int index = iFirst - jFirst;
-                    if (index < 0) {
-                        index = (firstDigitSet.length() + index) % firstDigitSet.length();
+                if (data.contains(" ")){
+                    String[] s = data.split(" ");
+                    String decryptData = "";
+                    for (String string : s) {
+                        decryptData += getDecryptData(string);
+                        decryptData += " ";
                     }
-                    char decFirst = firstDigitSet.charAt(index);
-                    // 剩余部分走原有逻辑
-                    String rest = data.substring(1);
-                    String decRest;
-                    if (rest.length() == 0) {
-                        decRest = "";
-                    } else if (rest.length() < 2 || Math.pow(this.mapper.getRadix(), rest.getBytes(StandardCharsets.UTF_8).length) < 1000000) {
-                        List<String> list = toList(rest);
-                        StringBuilder decrypt = new StringBuilder();
-                        for (int idx = 0; idx < list.size(); idx++) {
-                            String s = list.get(idx);
-                            int j = (sortCode + idx + 1) % numberMapperStr.length();
-                            int i = numberMapperStr.indexOf(s);
-                            int idxDec = i - j;
-                            if (idxDec < 0) {
-                                idxDec = (numberMapperStr.length() + idxDec) % numberMapperStr.length();
-                            }
-                            decrypt.append(numberMapperStr.charAt(idxDec));
-                        }
-                        decRest = decrypt.toString();
-                    } else {
-                        List<String> plainValues = checkArgs(this.mapper.getRadix(), rest);
-                        StringBuilder decryptedText = new StringBuilder();
-                        for (String plainValue : plainValues) {
-                            decryptedText.append(new String(decrypt(plainValue.toCharArray())));
-                        }
-                        decRest = decryptedText.toString();
-                    }
-                    return decFirst + decRest;
+                    return decryptData.trim();
                 }
-                // 非数字集或长度为1，走原有逻辑
-                if (data.length() < 2 || Math.pow(this.mapper.getRadix(), data.getBytes(StandardCharsets.UTF_8).length) < 1000000) {
-                    List<String> list = toList(data);
-                    StringBuilder decrypt = new StringBuilder();
-                    for (int idx = 0; idx < list.size(); idx++) {
-                        String s = list.get(idx);
-                        int j = (sortCode + idx) % numberMapperStr.length();
-                        int i = numberMapperStr.indexOf(s);
-                        int index = i - j;
-                        if (index < 0) {
-                            index = (numberMapperStr.length() + index) % numberMapperStr.length();
-                        }
-                        decrypt.append(numberMapperStr.charAt(index));
-                    }
-                    return decrypt.toString();
-                }
-                List<String> plainValues = checkArgs(this.mapper.getRadix(), data);
-                StringBuilder decryptedText = new StringBuilder();
-                for (String plainValue : plainValues) {
-                    decryptedText.append(new String(decrypt(plainValue.toCharArray())));
-                }
-                return decryptedText.toString();
+                return getDecryptData(data);
             } catch (Exception e) {
                 e.printStackTrace();
                 return data;
