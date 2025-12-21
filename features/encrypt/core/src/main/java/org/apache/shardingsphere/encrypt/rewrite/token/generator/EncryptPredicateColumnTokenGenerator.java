@@ -45,6 +45,7 @@ import org.apache.shardingsphere.sql.parser.sql.common.value.identifier.Identifi
 
 import java.util.Collection;
 import java.util.Collections;
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Optional;
@@ -74,10 +75,22 @@ public final class EncryptPredicateColumnTokenGenerator implements CollectionSQL
             columnSegments = ((WhereAvailable) sqlStatementContext).getColumnSegments();
             whereSegments = ((WhereAvailable) sqlStatementContext).getWhereSegments();
         }
+        boolean multipleTables = sqlStatementContext.getTablesContext().getSimpleTableSegments().size() > 1;
+        Collection<ColumnSegment> filteredColumnSegments = columnSegments;
+        if (multipleTables) {
+            filteredColumnSegments = new ArrayList<>(columnSegments.size());
+            for (ColumnSegment each : columnSegments) {
+                if (!each.getOwner().isPresent()) {
+                    // Avoid mis-encrypting owner-less columns in multi-table JOIN scenarios
+                    continue;
+                }
+                filteredColumnSegments.add(each);
+            }
+        }
         String defaultSchema = DatabaseTypeEngine.getDefaultSchemaName(sqlStatementContext.getDatabaseType(), databaseName);
         ShardingSphereSchema schema = sqlStatementContext.getTablesContext().getSchemaName().map(schemas::get).orElseGet(() -> schemas.get(defaultSchema));
-        Map<String, String> columnExpressionTableNames = sqlStatementContext.getTablesContext().findTableNamesByColumnSegment(columnSegments, schema);
-        return generateSQLTokens(columnSegments, columnExpressionTableNames, whereSegments);
+        Map<String, String> columnExpressionTableNames = sqlStatementContext.getTablesContext().findTableNamesByColumnSegment(filteredColumnSegments, schema);
+        return generateSQLTokens(filteredColumnSegments, columnExpressionTableNames, whereSegments);
     }
     
     private Collection<SQLToken> generateSQLTokens(final Collection<ColumnSegment> columnSegments,
