@@ -41,7 +41,7 @@ public final class EncryptDQLResultDecorator implements ResultDecorator<EncryptR
     
     @Override
     public MergedResult decorate(final QueryResult queryResult, final SQLStatementContext sqlStatementContext, final EncryptRule rule) {
-        return new EncryptMergedResult(database, encryptRule, selectStatementContext, new TransparentMergedResult(queryResult));
+        return new EncryptMergedResult(database, encryptRule, selectStatementContext, new TransparentMergedResult(queryResult), queryResult.getMetaData());
     }
     
     @Override

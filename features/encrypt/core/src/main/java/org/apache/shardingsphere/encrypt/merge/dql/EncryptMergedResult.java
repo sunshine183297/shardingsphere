@@ -25,20 +25,24 @@ import org.apache.shardingsphere.infra.binder.segment.select.projection.impl.Sho
 import org.apache.shardingsphere.infra.binder.segment.table.TablesContext;
 import org.apache.shardingsphere.infra.binder.statement.dml.SelectStatementContext;
 import org.apache.shardingsphere.infra.database.type.DatabaseTypeEngine;
+import org.apache.shardingsphere.infra.executor.sql.execute.result.query.QueryResultMetaData;
 import org.apache.shardingsphere.infra.merge.result.MergedResult;
 import org.apache.shardingsphere.infra.metadata.database.ShardingSphereDatabase;
 
 import java.io.InputStream;
 import java.io.Reader;
 import java.sql.SQLException;
-import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collections;
 import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -56,12 +60,25 @@ public final class EncryptMergedResult implements MergedResult {
     
     private final List<ColumnMeta> columnMetas;
     
+    private final Map<String, ColumnMeta> columnMetaByLabel;
+    
+    private final Set<String> conflictColumnLabels = new HashSet<>();
+    
+    private final QueryResultMetaData queryResultMetaData;
+    
     public EncryptMergedResult(final ShardingSphereDatabase database, final EncryptRule encryptRule, final SelectStatementContext selectStatementContext, final MergedResult mergedResult) {
+        this(database, encryptRule, selectStatementContext, mergedResult, null);
+    }
+    
+    public EncryptMergedResult(final ShardingSphereDatabase database, final EncryptRule encryptRule, final SelectStatementContext selectStatementContext,
+                               final MergedResult mergedResult, final QueryResultMetaData queryResultMetaData) {
         this.database = database;
         this.encryptRule = encryptRule;
         this.selectStatementContext = selectStatementContext;
         this.mergedResult = mergedResult;
+        this.queryResultMetaData = queryResultMetaData;
         this.columnMetas = buildColumnMetas(selectStatementContext);
+        this.columnMetaByLabel = buildColumnMetaByLabelMap(columnMetas);
     }
     
     @Override
@@ -77,23 +94,6 @@ public final class EncryptMergedResult implements MergedResult {
         }
 
         Optional<String> tableName = columnMeta.getTableName();
-
-        TablesContext tablesContext = selectStatementContext.getTablesContext();
-        String schemaName = tablesContext.getSchemaName()
-                .orElseGet(() -> DatabaseTypeEngine.getDefaultSchemaName(selectStatementContext.getDatabaseType(), database.getName()));
-        Map<String, String> expressionTableNames = tablesContext.findTableNamesByColumnProjection(Collections.singleton(columnProjection.get()), database.getSchema(schemaName));
-        // Avoid mis-decrypt for owner-less columns in multi-table join with star projection
-        if (tablesContext.getSimpleTableSegments().size() > 1 && !columnProjection.get().getOwner().isPresent()) {
-            return mergedResult.getValue(columnIndex, type);
-        }
-        // Avoid mis-decrypt when table name cannot be resolved uniquely in multi-table queries
-        if (tablesContext.getSimpleTableSegments().size() > 1 && !expressionTableNames.containsKey(columnProjection.get().getExpression())) {
-            return mergedResult.getValue(columnIndex, type);
-        }
-        
-        if (!tableName.isPresent()) {
-            return mergedResult.getValue(columnIndex, type);
-        }
         if (!encryptRule.findEncryptTable(tableName.get()).map(optional -> optional.isEncryptColumn(columnMeta.getLogicColumnName())).orElse(false)) {
             return mergedResult.getValue(columnIndex, type);
         }
@@ -103,11 +103,12 @@ public final class EncryptMergedResult implements MergedResult {
         return encryptColumn.getCipher().decrypt(database.getName(), schemaName, tableName.get(), columnMeta.getLogicColumnName(), cipherValue);
     }
     
-    private ColumnMeta getColumnMeta(final int columnIndex) {
-        if (columnIndex <= 0 || columnIndex > columnMetas.size()) {
+    private ColumnMeta getColumnMeta(final int columnIndex) throws SQLException {
+        if (null == queryResultMetaData || columnIndex <= 0) {
             return null;
         }
-        return columnMetas.get(columnIndex - 1);
+        String columnLabel = queryResultMetaData.getColumnLabel(columnIndex);
+        return findColumnMetaByLabel(columnLabel);
     }
     
     private List<ColumnMeta> buildColumnMetas(final SelectStatementContext statementContext) {
@@ -145,6 +146,35 @@ public final class EncryptMergedResult implements MergedResult {
             }
         }
         return result;
+    }
+    
+    private Map<String, ColumnMeta> buildColumnMetaByLabelMap(final Collection<ColumnMeta> columnMetas) {
+        Map<String, ColumnMeta> result = new HashMap<>(columnMetas.size(), 1F);
+        for (ColumnMeta each : columnMetas) {
+            String columnLabel = each.getColumnLabel();
+            if (null == columnLabel) {
+                continue;
+            }
+            String key = columnLabel.toLowerCase(Locale.ROOT);
+            if (result.containsKey(key)) {
+                conflictColumnLabels.add(key);
+                result.remove(key);
+                continue;
+            }
+            if (conflictColumnLabels.contains(key)) {
+                continue;
+            }
+            result.put(key, each);
+        }
+        return result;
+    }
+    
+    private ColumnMeta findColumnMetaByLabel(final String columnLabel) {
+        if (null == columnLabel) {
+            return null;
+        }
+        String key = columnLabel.toLowerCase(Locale.ROOT);
+        return conflictColumnLabels.contains(key) ? null : columnMetaByLabel.get(key);
     }
     
     private Optional<String> resolveTableName(final String owner, final Collection<String> simpleTableNames, final TablesContext tablesContext) {
