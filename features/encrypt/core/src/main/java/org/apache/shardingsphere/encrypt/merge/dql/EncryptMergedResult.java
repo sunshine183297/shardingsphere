@@ -65,7 +65,10 @@ public final class EncryptMergedResult implements MergedResult {
     private final Set<String> conflictColumnLabels = new HashSet<>();
     
     private final QueryResultMetaData queryResultMetaData;
-    
+
+    private final boolean useJdbcMetaDataForColumnMeta;
+
+
     public EncryptMergedResult(final ShardingSphereDatabase database, final EncryptRule encryptRule, final SelectStatementContext selectStatementContext, final MergedResult mergedResult) {
         this(database, encryptRule, selectStatementContext, mergedResult, null);
     }
@@ -77,44 +80,123 @@ public final class EncryptMergedResult implements MergedResult {
         this.selectStatementContext = selectStatementContext;
         this.mergedResult = mergedResult;
         this.queryResultMetaData = queryResultMetaData;
+        this.useJdbcMetaDataForColumnMeta = null != queryResultMetaData
+                && isJoinQuery(selectStatementContext)
+                && hasShorthandProjection(selectStatementContext);
+
         this.columnMetas = buildColumnMetas(selectStatementContext);
         this.columnMetaByLabel = buildColumnMetaByLabelMap(columnMetas);
+
     }
     
     @Override
     public boolean next() throws SQLException {
         return mergedResult.next();
     }
-    
+
     @Override
     public Object getValue(final int columnIndex, final Class<?> type) throws SQLException {
+
+//        // 原逻辑
+//        ColumnMeta columnMeta = getColumnMeta(columnIndex);
+//        if (null == columnMeta || !columnMeta.getTableName().isPresent()) {
+//            return mergedResult.getValue(columnIndex, type);
+//        }
+//
+//        Optional<String> tableName = columnMeta.getTableName();
+//        if (!encryptRule.findEncryptTable(tableName.get())
+//                .map(optional -> optional.isEncryptColumn(columnMeta.getLogicColumnName()))
+//                .orElse(false)) {
+//            return mergedResult.getValue(columnIndex, type);
+//        }
+//
+//        Object cipherValue = mergedResult.getValue(columnIndex, Object.class);
+//        EncryptColumn encryptColumn =
+//                encryptRule.getEncryptTable(tableName.get()).getEncryptColumn(columnMeta.getLogicColumnName());
+//
+//        return encryptColumn.getCipher().decrypt(
+//                database.getName(),
+//                getSchemaName(),
+//                tableName.get(),
+//                columnMeta.getLogicColumnName(),
+//                cipherValue
+//        );
         ColumnMeta columnMeta = getColumnMeta(columnIndex);
-        if (null == columnMeta || !columnMeta.getTableName().isPresent()) {
+        if (null == columnMeta) {
+            return mergedResult.getValue(columnIndex, type);
+        }
+
+        String logicColumnName = columnMeta.getLogicColumnName();
+        if (logicColumnName == null || logicColumnName.isEmpty()) {
             return mergedResult.getValue(columnIndex, type);
         }
 
         Optional<String> tableName = columnMeta.getTableName();
-        if (!encryptRule.findEncryptTable(tableName.get()).map(optional -> optional.isEncryptColumn(columnMeta.getLogicColumnName())).orElse(false)) {
+
+        // tableName 为空 → 尝试反推
+        if (!tableName.isPresent()) {
+            tableName = tryInferEncryptTableByColumn(logicColumnName);
+        }
+
+        if (!tableName.isPresent()) {
             return mergedResult.getValue(columnIndex, type);
         }
+
+        if (!encryptRule.findEncryptTable(tableName.get())
+                .map(t -> t.isEncryptColumn(logicColumnName))
+                .orElse(false)) {
+            return mergedResult.getValue(columnIndex, type);
+        }
+
         Object cipherValue = mergedResult.getValue(columnIndex, Object.class);
-        String schemaName = getSchemaName();
-        EncryptColumn encryptColumn = encryptRule.getEncryptTable(tableName.get()).getEncryptColumn(columnMeta.getLogicColumnName());
-        return encryptColumn.getCipher().decrypt(database.getName(), schemaName, tableName.get(), columnMeta.getLogicColumnName(), cipherValue);
+        EncryptColumn encryptColumn =
+                encryptRule.getEncryptTable(tableName.get()).getEncryptColumn(logicColumnName);
+        System.out.println("[decrypt-hit] col=" + logicColumnName + ", table=" + tableName.get());
+
+        return encryptColumn.getCipher().decrypt(
+                database.getName(),
+                getSchemaName(),
+                tableName.get(),
+                logicColumnName,
+                cipherValue
+        );
+
     }
-    
+
+    private Optional<String> tryInferEncryptTableByColumn(final String logicColumnName) {
+        Collection<String> tableNames = selectStatementContext.getTablesContext().getTableNames();
+        String matched = null;
+        for (String table : tableNames) {
+            if (encryptRule.findEncryptTable(table)
+                    .map(t -> t.isEncryptColumn(logicColumnName))
+                    .orElse(false)) {
+                if (matched != null) {
+                    // 多表同名列，放弃解密，避免误解
+                    return Optional.empty();
+                }
+                matched = table;
+            }
+        }
+        return Optional.ofNullable(matched);
+    }
+
+
+
+
     private ColumnMeta getColumnMeta(final int columnIndex) throws SQLException {
         if (null == queryResultMetaData || columnIndex <= 0) {
             return null;
         }
         String columnLabel = queryResultMetaData.getColumnLabel(columnIndex);
-        return findColumnMetaByLabel(columnLabel);
+        ColumnMeta meta = findColumnMetaByLabel(columnLabel);
+
+
+        return meta;
     }
-    
-    private List<ColumnMeta> buildColumnMetas(final SelectStatementContext statementContext) {
-        if (null == statementContext) {
-            return Collections.emptyList();
-        }
+
+
+
+    private List<ColumnMeta> buildColumnMetasFromProjections(final SelectStatementContext statementContext) {
         List<Projection> projections = statementContext.getProjectionsContext().getExpandProjections();
         if (projections.isEmpty()) {
             return Collections.emptyList();
@@ -147,7 +229,52 @@ public final class EncryptMergedResult implements MergedResult {
         }
         return result;
     }
-    
+    private List<ColumnMeta> buildColumnMetasFromJdbcMetaData() throws SQLException {
+        int columnCount = queryResultMetaData.getColumnCount();
+        List<ColumnMeta> result = new LinkedList<>();
+        for (int i = 1; i <= columnCount; i++) {
+            Optional<String> tableName = Optional.ofNullable(emptyToNull(queryResultMetaData.getTableName(i)));
+
+            String columnName = emptyToNull(queryResultMetaData.getColumnName(i));
+            String columnLabel = emptyToNull(queryResultMetaData.getColumnLabel(i));
+
+            // ⭐ 核心修复点：表达式列 → 用 label 作为逻辑列名
+            String logicColumnName = columnName;
+            if (logicColumnName == null || looksLikeExpression(logicColumnName)) {
+                logicColumnName = columnLabel;
+            }
+
+            result.add(new ColumnMeta(tableName, logicColumnName, columnLabel));
+        }
+        return result;
+    }
+
+    private String emptyToNull(final String s) {
+        return (s == null || s.trim().isEmpty()) ? null : s;
+    }
+
+    private boolean looksLikeExpression(final String s) {
+        // 只要不是纯列名，就认为是表达式
+        return !s.matches("^[a-zA-Z0-9_]+$");
+    }
+
+
+    private List<ColumnMeta> buildColumnMetas(final SelectStatementContext statementContext) {
+        if (null == statementContext) {
+            return Collections.emptyList();
+        }
+        if (useJdbcMetaDataForColumnMeta) {
+            try {
+                return buildColumnMetasFromJdbcMetaData();
+            } catch (final SQLException ex) {
+                // fallback to original behavior if metadata is not available
+                return buildColumnMetasFromProjections(statementContext);
+            }
+        }
+        return buildColumnMetasFromProjections(statementContext);
+    }
+
+
     private Map<String, ColumnMeta> buildColumnMetaByLabelMap(final Collection<ColumnMeta> columnMetas) {
         Map<String, ColumnMeta> result = new HashMap<>(columnMetas.size(), 1F);
         for (ColumnMeta each : columnMetas) {
@@ -199,7 +326,17 @@ public final class EncryptMergedResult implements MergedResult {
         return selectStatementContext.getTablesContext().getSchemaName()
                 .orElseGet(() -> DatabaseTypeEngine.getDefaultSchemaName(selectStatementContext.getDatabaseType(), database.getName()));
     }
-    
+
+    private boolean isJoinQuery(final SelectStatementContext statementContext) {
+        return statementContext.getTablesContext().getSimpleTableSegments().size() > 1;
+    }
+
+    private boolean hasShorthandProjection(final SelectStatementContext statementContext) {
+        return statementContext.getProjectionsContext().getExpandProjections().stream()
+                .anyMatch(each -> each instanceof ShorthandProjection);
+    }
+
+
     @Override
     public Object getCalendarValue(final int columnIndex, final Class<?> type, final Calendar calendar) throws SQLException {
         return mergedResult.getCalendarValue(columnIndex, type, calendar);

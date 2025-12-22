@@ -314,22 +314,81 @@ public final class DatabaseConnector implements DatabaseBackendHandler {
         }
         return result;
     }
+
+
     
+//    private int getColumnCount(final ExecutionContext executionContext, final QueryResult queryResultSample) throws SQLException {
+//        return selectContainsEnhancedTable && hasSelectExpandProjections(executionContext.getSqlStatementContext())
+//                ? ((SelectStatementContext) executionContext.getSqlStatementContext()).getProjectionsContext().getExpandProjections().size()
+//                : queryResultSample.getMetaData().getColumnCount();
+//    }
+
     private int getColumnCount(final ExecutionContext executionContext, final QueryResult queryResultSample) throws SQLException {
-        return selectContainsEnhancedTable && hasSelectExpandProjections(executionContext.getSqlStatementContext())
-                ? ((SelectStatementContext) executionContext.getSqlStatementContext()).getProjectionsContext().getExpandProjections().size()
-                : queryResultSample.getMetaData().getColumnCount();
+        int metaDataColumnCount = queryResultSample.getMetaData().getColumnCount();
+
+        if (!(selectContainsEnhancedTable && hasSelectExpandProjections(executionContext.getSqlStatementContext()))) {
+            return metaDataColumnCount;
+        }
+
+        int expandProjectionCount =
+                ((SelectStatementContext) executionContext.getSqlStatementContext())
+                        .getProjectionsContext().getExpandProjections().size();
+
+        // ⭐ 关键：取二者最大值
+        return Math.max(metaDataColumnCount, expandProjectionCount);
     }
     
     private boolean hasSelectExpandProjections(final SQLStatementContext sqlStatementContext) {
         return sqlStatementContext instanceof SelectStatementContext && !((SelectStatementContext) sqlStatementContext).getProjectionsContext().getExpandProjections().isEmpty();
     }
     
-    private QueryHeader createQueryHeader(final QueryHeaderBuilderEngine queryHeaderBuilderEngine, final ExecutionContext executionContext,
-                                          final QueryResult queryResultSample, final ShardingSphereDatabase database, final int columnIndex) throws SQLException {
-        return selectContainsEnhancedTable && hasSelectExpandProjections(executionContext.getSqlStatementContext())
-                ? queryHeaderBuilderEngine.build(((SelectStatementContext) executionContext.getSqlStatementContext()).getProjectionsContext(), queryResultSample.getMetaData(), database, columnIndex)
-                : queryHeaderBuilderEngine.build(queryResultSample.getMetaData(), database, columnIndex);
+//    private QueryHeader createQueryHeader(final QueryHeaderBuilderEngine queryHeaderBuilderEngine, final ExecutionContext executionContext,
+//                                          final QueryResult queryResultSample, final ShardingSphereDatabase database, final int columnIndex) throws SQLException {
+//        return selectContainsEnhancedTable && hasSelectExpandProjections(executionContext.getSqlStatementContext())
+//                ? queryHeaderBuilderEngine.build(((SelectStatementContext) executionContext.getSqlStatementContext()).getProjectionsContext(), queryResultSample.getMetaData(), database, columnIndex)
+//                : queryHeaderBuilderEngine.build(queryResultSample.getMetaData(), database, columnIndex);
+//    }
+
+    private QueryHeader createQueryHeader(
+            final QueryHeaderBuilderEngine queryHeaderBuilderEngine,
+            final ExecutionContext executionContext,
+            final QueryResult queryResultSample,
+            final ShardingSphereDatabase database,
+            final int columnIndex) throws SQLException {
+
+        SQLStatementContext sqlStatementContext = executionContext.getSqlStatementContext();
+
+        boolean hasExpandProjections = hasSelectExpandProjections(sqlStatementContext);
+        int metaDataColumnCount = queryResultSample.getMetaData().getColumnCount();
+        int expandProjectionCount = hasExpandProjections
+                ? ((SelectStatementContext) sqlStatementContext)
+                .getProjectionsContext().getExpandProjections().size()
+                : 0;
+
+        /**
+         * ⭐ 核心规则 ⭐
+         *
+         * 只要 JDBC MetaData 的列数 > ExpandProjections 的列数
+         * 就【必须】完全使用 MetaData 构造 QueryHeader
+         */
+        if (!selectContainsEnhancedTable
+                || !hasExpandProjections
+                || metaDataColumnCount > expandProjectionCount) {
+
+            return queryHeaderBuilderEngine.build(
+                    queryResultSample.getMetaData(),
+                    database,
+                    columnIndex
+            );
+        }
+
+        // 只有在列数完全一致时，才允许用 projections
+        return queryHeaderBuilderEngine.build(
+                ((SelectStatementContext) sqlStatementContext).getProjectionsContext(),
+                queryResultSample.getMetaData(),
+                database,
+                columnIndex
+        );
     }
     
     private MergedResult mergeQuery(final SQLStatementContext sqlStatementContext, final List<QueryResult> queryResults) throws SQLException {
