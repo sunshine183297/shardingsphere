@@ -117,12 +117,20 @@ public final class EncryptConditionEngine {
             return;
         }
         for (ColumnSegment each : ColumnExtractor.extract(expression)) {
+            if (!each.getOwner().isPresent() && isMultipleTables(expressionTableNames)) {
+                // Avoid mis-encrypting owner-less columns in multi-table JOIN scenarios
+                continue;
+            }
             String tableName = expressionTableNames.getOrDefault(each.getExpression(), "");
             Optional<EncryptTable> encryptTable = encryptRule.findEncryptTable(tableName);
             if (encryptTable.isPresent() && encryptTable.get().isEncryptColumn(each.getIdentifier().getValue())) {
                 createEncryptCondition(expression, tableName).ifPresent(encryptConditions::add);
             }
         }
+    }
+
+    private boolean isMultipleTables(final Map<String, String> expressionTableNames) {
+        return new HashSet<>(expressionTableNames.values()).size() > 1;
     }
     
     private Optional<ExpressionSegment> findNotContainsNullLiteralsExpression(final ExpressionSegment expression) {

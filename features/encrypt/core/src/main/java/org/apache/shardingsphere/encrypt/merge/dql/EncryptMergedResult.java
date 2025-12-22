@@ -17,10 +17,11 @@
 
 package org.apache.shardingsphere.encrypt.merge.dql;
 
-import lombok.RequiredArgsConstructor;
 import org.apache.shardingsphere.encrypt.rule.EncryptRule;
 import org.apache.shardingsphere.encrypt.rule.column.EncryptColumn;
+import org.apache.shardingsphere.infra.binder.segment.select.projection.Projection;
 import org.apache.shardingsphere.infra.binder.segment.select.projection.impl.ColumnProjection;
+import org.apache.shardingsphere.infra.binder.segment.select.projection.impl.ShorthandProjection;
 import org.apache.shardingsphere.infra.binder.segment.table.TablesContext;
 import org.apache.shardingsphere.infra.binder.statement.dml.SelectStatementContext;
 import org.apache.shardingsphere.infra.database.type.DatabaseTypeEngine;
@@ -30,15 +31,19 @@ import org.apache.shardingsphere.infra.metadata.database.ShardingSphereDatabase;
 import java.io.InputStream;
 import java.io.Reader;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collections;
+import java.util.Collection;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 /**
  * Merged result for encrypt.
  */
-@RequiredArgsConstructor
 public final class EncryptMergedResult implements MergedResult {
     
     private final ShardingSphereDatabase database;
@@ -49,6 +54,16 @@ public final class EncryptMergedResult implements MergedResult {
     
     private final MergedResult mergedResult;
     
+    private final List<ColumnMeta> columnMetas;
+    
+    public EncryptMergedResult(final ShardingSphereDatabase database, final EncryptRule encryptRule, final SelectStatementContext selectStatementContext, final MergedResult mergedResult) {
+        this.database = database;
+        this.encryptRule = encryptRule;
+        this.selectStatementContext = selectStatementContext;
+        this.mergedResult = mergedResult;
+        this.columnMetas = buildColumnMetas(selectStatementContext);
+    }
+    
     @Override
     public boolean next() throws SQLException {
         return mergedResult.next();
@@ -56,37 +71,88 @@ public final class EncryptMergedResult implements MergedResult {
     
     @Override
     public Object getValue(final int columnIndex, final Class<?> type) throws SQLException {
-        Optional<ColumnProjection> columnProjection = selectStatementContext.findColumnProjection(columnIndex);
-        if (!columnProjection.isPresent()) {
+        ColumnMeta columnMeta = getColumnMeta(columnIndex);
+        if (null == columnMeta || !columnMeta.getTableName().isPresent()) {
             return mergedResult.getValue(columnIndex, type);
         }
-        TablesContext tablesContext = selectStatementContext.getTablesContext();
-        String schemaName = tablesContext.getSchemaName()
-                .orElseGet(() -> DatabaseTypeEngine.getDefaultSchemaName(selectStatementContext.getDatabaseType(), database.getName()));
-        Map<String, String> expressionTableNames = tablesContext.findTableNamesByColumnProjection(Collections.singleton(columnProjection.get()), database.getSchema(schemaName));
-        Optional<String> tableName = findTableName(columnProjection.get(), expressionTableNames);
+        Optional<String> tableName = columnMeta.getTableName();
         if (!tableName.isPresent()) {
             return mergedResult.getValue(columnIndex, type);
         }
-        if (!encryptRule.findEncryptTable(tableName.get()).map(optional -> optional.isEncryptColumn(columnProjection.get().getName())).orElse(false)) {
+        if (!encryptRule.findEncryptTable(tableName.get()).map(optional -> optional.isEncryptColumn(columnMeta.getLogicColumnName())).orElse(false)) {
             return mergedResult.getValue(columnIndex, type);
         }
         Object cipherValue = mergedResult.getValue(columnIndex, Object.class);
-        EncryptColumn encryptColumn = encryptRule.getEncryptTable(tableName.get()).getEncryptColumn(columnProjection.get().getName());
-        return encryptColumn.getCipher().decrypt(database.getName(), schemaName, tableName.get(), columnProjection.get().getName(), cipherValue);
+        String schemaName = getSchemaName();
+        EncryptColumn encryptColumn = encryptRule.getEncryptTable(tableName.get()).getEncryptColumn(columnMeta.getLogicColumnName());
+        return encryptColumn.getCipher().decrypt(database.getName(), schemaName, tableName.get(), columnMeta.getLogicColumnName(), cipherValue);
     }
     
-    private Optional<String> findTableName(final ColumnProjection columnProjection, final Map<String, String> columnTableNames) {
-        String tableName = columnTableNames.get(columnProjection.getExpression());
-        if (null != tableName) {
-            return Optional.of(tableName);
+    private ColumnMeta getColumnMeta(final int columnIndex) {
+        if (columnIndex <= 0 || columnIndex > columnMetas.size()) {
+            return null;
         }
-        for (String each : selectStatementContext.getTablesContext().getTableNames()) {
-            if (encryptRule.findEncryptTable(each).map(optional -> optional.isEncryptColumn(columnProjection.getName())).orElse(false)) {
-                return Optional.of(each);
+        return columnMetas.get(columnIndex - 1);
+    }
+    
+    private List<ColumnMeta> buildColumnMetas(final SelectStatementContext statementContext) {
+        if (null == statementContext) {
+            return Collections.emptyList();
+        }
+        List<Projection> projections = statementContext.getProjectionsContext().getExpandProjections();
+        if (projections.isEmpty()) {
+            return Collections.emptyList();
+        }
+        TablesContext tablesContext = statementContext.getTablesContext();
+        Collection<String> simpleTableNames = tablesContext.getSimpleTableSegments().stream()
+                .map(each -> each.getTableName().getIdentifier().getValue()).collect(Collectors.toList());
+        String schemaName = getSchemaName();
+        List<ColumnMeta> result = new LinkedList<>();
+        for (Projection each : projections) {
+            if (each instanceof ColumnProjection) {
+                ColumnProjection columnProjection = (ColumnProjection) each;
+                String owner = columnProjection.getOwner();
+                Optional<String> tableName = resolveTableName(owner, simpleTableNames, tablesContext);
+                result.add(new ColumnMeta(tableName, columnProjection.getName(), columnProjection.getColumnLabel()));
+                continue;
+            }
+            if (each instanceof ShorthandProjection) {
+                Optional<String> owner = ((ShorthandProjection) each).getOwner();
+                Optional<String> tableName = resolveTableName(owner.orElse(null), simpleTableNames, tablesContext);
+                if (!tableName.isPresent()) {
+                    // Avoid mis-decrypt for owner-less result columns in multi-table join
+                    continue;
+                }
+                Collection<String> columnNames = database.getSchema(schemaName).getAllColumnNames(tableName.get());
+                for (String columnName : columnNames) {
+                    result.add(new ColumnMeta(tableName, columnName, columnName));
+                }
             }
         }
+        return result;
+    }
+    
+    private Optional<String> resolveTableName(final String owner, final Collection<String> simpleTableNames, final TablesContext tablesContext) {
+        if (null != owner) {
+            for (org.apache.shardingsphere.sql.parser.sql.common.segment.generic.table.SimpleTableSegment each : tablesContext.getSimpleTableSegments()) {
+                Optional<String> alias = each.getAliasName();
+                if (alias.isPresent() && alias.get().equalsIgnoreCase(owner)) {
+                    return Optional.of(each.getTableName().getIdentifier().getValue());
+                }
+                if (each.getTableName().getIdentifier().getValue().equalsIgnoreCase(owner)) {
+                    return Optional.of(each.getTableName().getIdentifier().getValue());
+                }
+            }
+        }
+        if (simpleTableNames.size() == 1) {
+            return Optional.of(simpleTableNames.iterator().next());
+        }
         return Optional.empty();
+    }
+    
+    private String getSchemaName() {
+        return selectStatementContext.getTablesContext().getSchemaName()
+                .orElseGet(() -> DatabaseTypeEngine.getDefaultSchemaName(selectStatementContext.getDatabaseType(), database.getName()));
     }
     
     @Override
@@ -107,5 +173,32 @@ public final class EncryptMergedResult implements MergedResult {
     @Override
     public boolean wasNull() throws SQLException {
         return mergedResult.wasNull();
+    }
+    
+    private static final class ColumnMeta {
+        
+        private final Optional<String> tableName;
+        
+        private final String logicColumnName;
+        
+        private final String columnLabel;
+        
+        ColumnMeta(final Optional<String> tableName, final String logicColumnName, final String columnLabel) {
+            this.tableName = tableName;
+            this.logicColumnName = logicColumnName;
+            this.columnLabel = columnLabel;
+        }
+        
+        Optional<String> getTableName() {
+            return tableName;
+        }
+        
+        String getLogicColumnName() {
+            return logicColumnName;
+        }
+        
+        String getColumnLabel() {
+            return columnLabel;
+        }
     }
 }
