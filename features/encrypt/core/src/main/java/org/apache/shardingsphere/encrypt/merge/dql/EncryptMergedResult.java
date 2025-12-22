@@ -75,7 +75,22 @@ public final class EncryptMergedResult implements MergedResult {
         if (null == columnMeta || !columnMeta.getTableName().isPresent()) {
             return mergedResult.getValue(columnIndex, type);
         }
+
         Optional<String> tableName = columnMeta.getTableName();
+
+        TablesContext tablesContext = selectStatementContext.getTablesContext();
+        String schemaName = tablesContext.getSchemaName()
+                .orElseGet(() -> DatabaseTypeEngine.getDefaultSchemaName(selectStatementContext.getDatabaseType(), database.getName()));
+        Map<String, String> expressionTableNames = tablesContext.findTableNamesByColumnProjection(Collections.singleton(columnProjection.get()), database.getSchema(schemaName));
+        // Avoid mis-decrypt for owner-less columns in multi-table join with star projection
+        if (tablesContext.getSimpleTableSegments().size() > 1 && !columnProjection.get().getOwner().isPresent()) {
+            return mergedResult.getValue(columnIndex, type);
+        }
+        // Avoid mis-decrypt when table name cannot be resolved uniquely in multi-table queries
+        if (tablesContext.getSimpleTableSegments().size() > 1 && !expressionTableNames.containsKey(columnProjection.get().getExpression())) {
+            return mergedResult.getValue(columnIndex, type);
+        }
+        
         if (!tableName.isPresent()) {
             return mergedResult.getValue(columnIndex, type);
         }
