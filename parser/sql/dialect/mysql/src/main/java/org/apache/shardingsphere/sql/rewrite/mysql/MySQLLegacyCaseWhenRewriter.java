@@ -1,19 +1,4 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
- * this work for additional information regarding copyright ownership.
- * The ASF licenses this file to You under the Apache License, Version 2.0
- * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+
 
 package org.apache.shardingsphere.sql.rewrite.mysql;
 
@@ -28,171 +13,263 @@ public final class MySQLLegacyCaseWhenRewriter implements SQLParseRewriter {
     
     @Override
     public boolean support(final String sql) {
-        return null != findNextLegacyCase(sql, 0);
+        if (sql == null) {
+            return false;
+        }
+        final String lower = sql.toLowerCase(Locale.ROOT);
+        return lower.contains("case") && lower.contains("when 1 then");
     }
     
     @Override
     public String rewrite(final String sql) {
-        if (null == sql) {
-            return sql;
-        }
-        System.out.println(String.format("SQL parse rewrite before: %s", sql));
-        StringBuilder rewritten = new StringBuilder(sql.length());
-        int cursor = 0;
-        LegacyCaseMatch match;
-        while (null != (match = findNextLegacyCase(sql, cursor))) {
-            rewritten.append(sql, cursor, match.caseStart);
-            rewritten.append("CASE WHEN ").append(match.expression).append(" THEN");
-            cursor = match.afterThenIndex;
-        }
-        if (0 == rewritten.length()) {
-            System.out.println(String.format("SQL parse rewrite after : %s", sql));
-            return sql;
-        }
-        rewritten.append(sql.substring(cursor));
-        String result = rewritten.toString();
-        System.out.println(String.format("SQL parse rewrite after : %s", result));
-        return result;
-    }
-    
-    private LegacyCaseMatch findNextLegacyCase(final String sql, final int searchStart) {
-        if (null == sql || searchStart >= sql.length()) {
+        if (sql == null) {
             return null;
         }
-        String lowerSQL = sql.toLowerCase(Locale.ROOT);
-        int index = searchStart;
-        while (index < sql.length()) {
-            int caseIndex = lowerSQL.indexOf("case", index);
-            if (-1 == caseIndex) {
-                return null;
+        
+        final String lower = sql.toLowerCase(Locale.ROOT);
+        final StringBuilder out = new StringBuilder(sql.length() + 64);
+        
+        int cursor = 0;
+        boolean changed = false;
+        
+        while (true) {
+            int caseIdx = indexOfStandaloneKeyword(lower, "case", cursor);
+            if (caseIdx < 0) {
+                out.append(sql.substring(cursor));
+                break;
             }
-            if (!isStandaloneKeyword(lowerSQL, caseIndex, "case")) {
-                index = caseIndex + 4;
+            
+            // 输出 case 之前的内容
+            out.append(sql, cursor, caseIdx);
+            
+            int i = caseIdx + 4; // after "case"
+            i = skipWs(sql, i);
+            
+            // 如果是 searched CASE（CASE WHEN ...），跳过不处理
+            int whenIdxCandidate = indexOfStandaloneKeyword(lower, "when", i);
+            if (whenIdxCandidate == i) {
+                // 原样输出 "case"，继续后面
+                out.append(sql, caseIdx, i);
+                cursor = i;
                 continue;
             }
-            if (isInsideForbiddenFunction(lowerSQL, caseIndex)) {
-                index = caseIndex + 4;
+            
+            // 解析 expr：从 i 开始，直到遇到本 CASE 头部的 WHEN（且 expr 内部括号/字符串不破坏）
+            ExprParseResult expr = parseCaseExpr(sql, lower, i);
+            if (!expr.ok) {
+                // 解析失败，原样输出 "case"，继续
+                out.append(sql, caseIdx, i);
+                cursor = i;
                 continue;
             }
-            int afterCase = skipWhitespaces(lowerSQL, caseIndex + 4);
-            if (afterCase >= sql.length() || '(' != lowerSQL.charAt(afterCase)) {
-                index = caseIndex + 4;
+            
+            // expr.whenIndex 是 expr 之后的那个 WHEN 的位置（属于当前 CASE）
+            int whenPos = expr.whenIndex;
+            int j = whenPos + 4; // after "when"
+            j = skipWs(sql, j);
+            
+            // 必须是 WHEN 1 THEN（允许空白变化）
+            if (j >= sql.length() || sql.charAt(j) != '1') {
+                // 不是 legacy，原样输出从 caseIdx 到 expr.whenIndex，继续往后
+                out.append(sql, caseIdx, whenPos);
+                cursor = whenPos;
                 continue;
             }
-            int exprStart = afterCase + 1;
-            int exprEnd = findMatchingParenthesis(sql, afterCase);
-            if (-1 == exprEnd || exprEnd <= exprStart) {
-                index = caseIndex + 4;
+            j++; // after '1'
+            // 允许 1 后面紧跟空白
+            j = skipWs(sql, j);
+            
+            int thenPos = indexOfStandaloneKeyword(lower, "then", j);
+            if (thenPos != j) {
+                // 不是 WHEN 1 THEN（可能 WHEN 10 / WHEN 1.0 / WHEN 1+...），不处理
+                out.append(sql, caseIdx, whenPos);
+                cursor = whenPos;
                 continue;
             }
-            String expression = sql.substring(exprStart, exprEnd).trim();
-            if (expression.isEmpty()) {
-                index = caseIndex + 4;
-                continue;
-            }
-            int whenIndex = skipWhitespaces(lowerSQL, exprEnd + 1);
-            if (!startsWithKeyword(lowerSQL, whenIndex, "when")) {
-                index = caseIndex + 4;
-                continue;
-            }
-            int afterWhen = skipWhitespaces(lowerSQL, whenIndex + 4);
-            if (afterWhen >= sql.length() || '1' != lowerSQL.charAt(afterWhen) || isIdentifierChar(afterWhen + 1 < sql.length() ? lowerSQL.charAt(afterWhen + 1) : ' ')) {
-                index = caseIndex + 4;
-                continue;
-            }
-            int thenIndex = skipWhitespaces(lowerSQL, afterWhen + 1);
-            if (!startsWithKeyword(lowerSQL, thenIndex, "then")) {
-                index = caseIndex + 4;
-                continue;
-            }
-            int afterThen = thenIndex + 4;
-            return new LegacyCaseMatch(caseIndex, expression, afterThen);
+            
+            int afterThen = thenPos + 4;
+            
+            // ✅ 到这里：确认是 legacy CASE
+            // 输出：CASE WHEN <exprText> THEN
+            String exprText = expr.exprText.trim();
+            exprText = stripOnePairOfOuterParens(exprText); // 可选：去掉最外层括号更稳
+            out.append("CASE WHEN ").append(exprText).append(" THEN");
+            
+            cursor = afterThen;
+            changed = true;
         }
-        return null;
+        
+        final String rewritten = out.toString();
+        // if (changed) {
+        // System.out.println("====== [SQL PARSE REWRITE] ======");
+        // System.out.println("Before:\n" + sql);
+        // System.out.println("After:\n" + rewritten);
+        // System.out.println("================================");
+        // }
+        return rewritten;
     }
     
-    private int skipWhitespaces(final String text, final int start) {
-        int index = start;
-        while (index < text.length() && Character.isWhitespace(text.charAt(index))) {
-            index++;
+    // ---------------- helpers ----------------
+    
+    private static int skipWs(final String s, int i) {
+        while (i < s.length() && Character.isWhitespace(s.charAt(i))) {
+            i++;
         }
-        return index;
+        return i;
     }
     
-    private int findMatchingParenthesis(final String sql, final int leftParenthesisIndex) {
-        int depth = 0;
-        for (int i = leftParenthesisIndex; i < sql.length(); i++) {
-            char ch = sql.charAt(i);
-            if ('(' == ch) {
-                depth++;
-            } else if (')' == ch) {
-                depth--;
-                if (0 == depth) {
-                    return i;
-                }
+    /**
+     * Find standalone keyword (not part of identifier), case-insensitive (lower already).
+     */
+    private static int indexOfStandaloneKeyword(final String lower, final String kw, final int from) {
+        int idx = lower.indexOf(kw, from);
+        while (idx >= 0) {
+            if (isKeywordBoundary(lower, idx, kw.length())) {
+                return idx;
             }
+            idx = lower.indexOf(kw, idx + kw.length());
         }
         return -1;
     }
     
-    private boolean isStandaloneKeyword(final String lowerSQL, final int index, final String keyword) {
-        int end = index + keyword.length();
-        char before = index - 1 >= 0 ? lowerSQL.charAt(index - 1) : ' ';
-        char after = end < lowerSQL.length() ? lowerSQL.charAt(end) : ' ';
-        return !isIdentifierChar(before) && !isIdentifierChar(after);
+    private static boolean isKeywordBoundary(final String s, final int idx, final int len) {
+        char before = idx > 0 ? s.charAt(idx - 1) : ' ';
+        char after = (idx + len) < s.length() ? s.charAt(idx + len) : ' ';
+        return !isIdent(before) && !isIdent(after);
     }
     
-    private boolean isIdentifierChar(final char ch) {
-        return Character.isLetterOrDigit(ch) || '_' == ch;
+    private static boolean isIdent(final char c) {
+        return Character.isLetterOrDigit(c) || c == '_' || c == '$';
     }
     
-    private boolean startsWithKeyword(final String lowerSQL, final int index, final String keyword) {
-        if (index < 0 || index + keyword.length() > lowerSQL.length()) {
-            return false;
+    /**
+     * Parse expression part of "CASE <expr> WHEN ..."
+     * We must stop at the first WHEN that belongs to this CASE header.
+     * Must respect:
+     *  - parentheses nesting
+     *  - single quotes '...'
+     *  - double quotes "..."
+     *  - backticks `...`
+     */
+    private static ExprParseResult parseCaseExpr(final String sql, final String lower, final int exprStart) {
+        int i = exprStart;
+        
+        int depth = 0;
+        boolean inSingle = false;
+        boolean inDouble = false;
+        boolean inBacktick = false;
+        boolean escaped = false;
+        
+        while (i < sql.length()) {
+            char ch = sql.charAt(i);
+            
+            // handle escapes inside quotes (MySQL allows \' in some modes; we just keep it safe)
+            if ((inSingle || inDouble) && ch == '\\' && !escaped) {
+                escaped = true;
+                i++;
+                continue;
+            }
+            
+            if (!escaped) {
+                if (!inDouble && !inBacktick && ch == '\'') {
+                    inSingle = !inSingle;
+                    i++;
+                    continue;
+                }
+                if (!inSingle && !inBacktick && ch == '"') {
+                    inDouble = !inDouble;
+                    i++;
+                    continue;
+                }
+                if (!inSingle && !inDouble && ch == '`') {
+                    inBacktick = !inBacktick;
+                    i++;
+                    continue;
+                }
+            }
+            escaped = false;
+            
+            if (!inSingle && !inDouble && !inBacktick) {
+                if (ch == '(') {
+                    depth++;
+                } else if (ch == ')') {
+                    if (depth > 0) {
+                        depth--;
+                    }
+                } else {
+                    // only detect WHEN at depth==0 and not in quotes
+                    if (depth == 0) {
+                        int whenIdx = indexOfStandaloneKeyword(lower, "when", i);
+                        if (whenIdx == i) {
+                            String exprText = sql.substring(exprStart, whenIdx);
+                            return new ExprParseResult(true, exprText, whenIdx);
+                        }
+                    }
+                }
+            }
+            
+            i++;
         }
-        if (!lowerSQL.regionMatches(true, index, keyword, 0, keyword.length())) {
-            return false;
-        }
-        char before = index - 1 >= 0 ? lowerSQL.charAt(index - 1) : ' ';
-        char after = index + keyword.length() < lowerSQL.length() ? lowerSQL.charAt(index + keyword.length()) : ' ';
-        return !isIdentifierChar(before) && !isIdentifierChar(after);
+        
+        return new ExprParseResult(false, null, -1);
     }
     
-    private boolean isInsideForbiddenFunction(final String lowerSQL, final int caseIndex) {
-        int index = caseIndex - 1;
-        while (index >= 0 && Character.isWhitespace(lowerSQL.charAt(index))) {
-            index--;
+    private static String stripOnePairOfOuterParens(final String expr) {
+        String s = expr.trim();
+        if (s.length() < 2 || s.charAt(0) != '(' || s.charAt(s.length() - 1) != ')') {
+            return s;
         }
-        if (index < 0 || '(' != lowerSQL.charAt(index)) {
-            return false;
+        int depth = 0;
+        boolean inSingle = false, inDouble = false, inBacktick = false, escaped = false;
+        
+        for (int i = 0; i < s.length(); i++) {
+            char ch = s.charAt(i);
+            
+            if ((inSingle || inDouble) && ch == '\\' && !escaped) {
+                escaped = true;
+                continue;
+            }
+            
+            if (!escaped) {
+                if (!inDouble && !inBacktick && ch == '\'')
+                    inSingle = !inSingle;
+                else if (!inSingle && !inBacktick && ch == '"')
+                    inDouble = !inDouble;
+                else if (!inSingle && !inDouble && ch == '`')
+                    inBacktick = !inBacktick;
+            }
+            escaped = false;
+            
+            if (inSingle || inDouble || inBacktick) {
+                continue;
+            }
+            
+            if (ch == '(')
+                depth++;
+            else if (ch == ')')
+                depth--;
+            
+            // 外括号必须包住整个表达式：只有最后一个字符闭合到 0
+            if (depth == 0 && i != s.length() - 1) {
+                return s;
+            }
         }
-        index--;
-        while (index >= 0 && Character.isWhitespace(lowerSQL.charAt(index))) {
-            index--;
+        if (depth != 0) {
+            return s;
         }
-        if (index < 0) {
-            return false;
-        }
-        int end = index;
-        while (index >= 0 && Character.isLetter(lowerSQL.charAt(index))) {
-            index--;
-        }
-        String functionName = lowerSQL.substring(index + 1, end + 1);
-        return "concat".equals(functionName) || "if".equals(functionName) || "regexp".equals(functionName);
+        return s.substring(1, s.length() - 1).trim();
     }
     
-    private static final class LegacyCaseMatch {
+    private static final class ExprParseResult {
         
-        private final int caseStart;
+        final boolean ok;
+        final String exprText;
+        final int whenIndex;
         
-        private final String expression;
-        
-        private final int afterThenIndex;
-        
-        LegacyCaseMatch(final int caseStart, final String expression, final int afterThenIndex) {
-            this.caseStart = caseStart;
-            this.expression = expression;
-            this.afterThenIndex = afterThenIndex;
+        ExprParseResult(final boolean ok, final String exprText, final int whenIndex) {
+            this.ok = ok;
+            this.exprText = exprText;
+            this.whenIndex = whenIndex;
         }
     }
 }
