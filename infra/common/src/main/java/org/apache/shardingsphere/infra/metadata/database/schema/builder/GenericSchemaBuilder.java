@@ -22,6 +22,7 @@ import lombok.NoArgsConstructor;
 import org.apache.shardingsphere.infra.config.props.ConfigurationPropertyKey;
 import org.apache.shardingsphere.infra.database.type.DatabaseType;
 import org.apache.shardingsphere.infra.database.type.DatabaseTypeEngine;
+import org.apache.shardingsphere.infra.metadata.database.schema.loader.common.SchemaMetaDataLoader;
 import org.apache.shardingsphere.infra.metadata.database.schema.loader.metadata.SchemaMetaDataLoaderEngine;
 import org.apache.shardingsphere.infra.metadata.database.schema.loader.metadata.SchemaMetaDataLoaderMaterial;
 import org.apache.shardingsphere.infra.metadata.database.schema.loader.model.ColumnMetaData;
@@ -39,14 +40,17 @@ import org.apache.shardingsphere.infra.metadata.database.schema.util.SchemaMetaD
 import org.apache.shardingsphere.infra.rule.ShardingSphereRule;
 import org.apache.shardingsphere.infra.rule.identifier.type.TableContainedRule;
 
+import javax.sql.DataSource;
 import java.sql.SQLException;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.LinkedList;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
@@ -99,10 +103,52 @@ public final class GenericSchemaBuilder {
     private static Map<String, SchemaMetaData> loadSchemas(final Collection<String> tableNames, final GenericSchemaBuilderMaterial material) throws SQLException {
         boolean checkMetaDataEnable = material.getProps().getValue(ConfigurationPropertyKey.CHECK_TABLE_METADATA_ENABLED);
         Collection<SchemaMetaDataLoaderMaterial> schemaMetaDataLoaderMaterials = SchemaMetaDataUtils.getSchemaMetaDataLoaderMaterials(tableNames, material, checkMetaDataEnable);
-        if (schemaMetaDataLoaderMaterials.isEmpty()) {
+        Map<String, SchemaMetaData> ruleSchemaMetaDataMap = schemaMetaDataLoaderMaterials.isEmpty() ? Collections.emptyMap() : SchemaMetaDataLoaderEngine.load(schemaMetaDataLoaderMaterials);
+        Map<String, SchemaMetaData> nonRuleSchemaMetaDataMap = loadNonRuleSchemas(tableNames, material);
+        return mergeSchemaMetaDataMaps(ruleSchemaMetaDataMap, nonRuleSchemaMetaDataMap);
+    }
+    
+    private static Map<String, SchemaMetaData> loadNonRuleSchemas(final Collection<String> tableNames, final GenericSchemaBuilderMaterial material) throws SQLException {
+        if (material.getDataSourceMap().isEmpty()) {
             return Collections.emptyMap();
         }
-        return SchemaMetaDataLoaderEngine.load(schemaMetaDataLoaderMaterials);
+        Collection<SchemaMetaDataLoaderMaterial> schemaMetaDataLoaderMaterials = new LinkedList<>();
+        Set<String> ruleTableNames = new LinkedHashSet<>(tableNames);
+        for (Entry<String, DataSource> entry : material.getDataSourceMap().entrySet()) {
+            String dataSourceName = entry.getKey();
+            DataSource dataSource = entry.getValue();
+            DatabaseType storageType = material.getStorageTypes().get(dataSourceName);
+            if (null == storageType) {
+                continue;
+            }
+            Collection<String> nonRuleTableNames = new LinkedHashSet<>();
+            Map<String, Collection<String>> schemaTableNames = SchemaMetaDataLoader.loadSchemaTableNames(material.getDefaultSchemaName(), storageType, dataSource);
+            for (Collection<String> each : schemaTableNames.values()) {
+                for (String tableName : each) {
+                    if (!ruleTableNames.contains(tableName)) {
+                        nonRuleTableNames.add(tableName);
+                    }
+                }
+            }
+            if (!nonRuleTableNames.isEmpty()) {
+                schemaMetaDataLoaderMaterials.add(new SchemaMetaDataLoaderMaterial(nonRuleTableNames, dataSource, storageType, material.getDefaultSchemaName()));
+            }
+        }
+        return schemaMetaDataLoaderMaterials.isEmpty() ? Collections.emptyMap() : SchemaMetaDataLoaderEngine.load(schemaMetaDataLoaderMaterials);
+    }
+    
+    private static Map<String, SchemaMetaData> mergeSchemaMetaDataMaps(final Map<String, SchemaMetaData> ruleSchemaMetaDataMap, final Map<String, SchemaMetaData> nonRuleSchemaMetaDataMap) {
+        Map<String, SchemaMetaData> result = new LinkedHashMap<>(ruleSchemaMetaDataMap.size() + nonRuleSchemaMetaDataMap.size(), 1F);
+        mergeSchemaMetaDataMap(result, ruleSchemaMetaDataMap);
+        mergeSchemaMetaDataMap(result, nonRuleSchemaMetaDataMap);
+        return result;
+    }
+    
+    private static void mergeSchemaMetaDataMap(final Map<String, SchemaMetaData> schemaMetaDataMap, final Map<String, SchemaMetaData> addedSchemaMetaDataMap) {
+        for (SchemaMetaData each : addedSchemaMetaDataMap.values()) {
+            SchemaMetaData schemaMetaData = schemaMetaDataMap.computeIfAbsent(each.getName(), key -> new SchemaMetaData(each.getName(), new LinkedList<>()));
+            schemaMetaData.getTables().addAll(each.getTables());
+        }
     }
     
     private static Map<String, SchemaMetaData> translate(final Map<String, SchemaMetaData> schemaMetaDataMap, final GenericSchemaBuilderMaterial material) {
