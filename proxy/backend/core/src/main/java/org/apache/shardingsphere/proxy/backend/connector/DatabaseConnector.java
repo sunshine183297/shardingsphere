@@ -57,6 +57,7 @@ import org.apache.shardingsphere.proxy.backend.context.ProxyContext;
 import org.apache.shardingsphere.proxy.backend.exception.RuleNotExistedException;
 import org.apache.shardingsphere.proxy.backend.exception.StorageUnitNotExistedException;
 import org.apache.shardingsphere.proxy.backend.handler.data.DatabaseBackendHandler;
+import org.apache.shardingsphere.proxy.backend.handler.data.splitter.MultiTableUpdateSplitter;
 import org.apache.shardingsphere.proxy.backend.response.data.QueryResponseCell;
 import org.apache.shardingsphere.proxy.backend.response.data.QueryResponseRow;
 import org.apache.shardingsphere.proxy.backend.response.header.ResponseHeader;
@@ -71,6 +72,7 @@ import org.apache.shardingsphere.sql.parser.sql.common.statement.SQLStatement;
 import org.apache.shardingsphere.sql.parser.sql.common.statement.dml.DMLStatement;
 import org.apache.shardingsphere.sql.parser.sql.common.statement.dml.SelectStatement;
 import org.apache.shardingsphere.sql.parser.sql.dialect.statement.mysql.dml.MySQLInsertStatement;
+import org.apache.shardingsphere.parser.rule.SQLParserRule;
 import org.apache.shardingsphere.sqlfederation.executor.SQLFederationExecutorContext;
 import org.apache.shardingsphere.transaction.api.TransactionType;
 
@@ -173,10 +175,20 @@ public final class DatabaseConnector implements DatabaseBackendHandler {
     private Collection<ExecutionContext> generateExecutionContexts() {
         Collection<ExecutionContext> result = new LinkedList<>();
         MetaDataContexts metaDataContexts = ProxyContext.getInstance().getContextManager().getMetaDataContexts();
+        MultiTableUpdateSplitter splitter = new MultiTableUpdateSplitter(metaDataContexts.getMetaData(), database, metaDataContexts.getMetaData().getGlobalRuleMetaData().getSingleRule(
+                SQLParserRule.class));
+        Optional<Collection<QueryContext>> splitQueryContexts = splitter.split(queryContext);
+        if (splitQueryContexts.isPresent()) {
+            for (QueryContext each : splitQueryContexts.get()) {
+                ExecutionContext executionContext = new KernelProcessor().generateExecutionContext(each, database, metaDataContexts.getMetaData().getGlobalRuleMetaData(),
+                        metaDataContexts.getMetaData().getProps(), databaseConnectionManager.getConnectionSession().getConnectionContext());
+                result.add(executionContext);
+            }
+            return result;
+        }
         ExecutionContext executionContext = new KernelProcessor().generateExecutionContext(queryContext, database, metaDataContexts.getMetaData().getGlobalRuleMetaData(),
                 metaDataContexts.getMetaData().getProps(), databaseConnectionManager.getConnectionSession().getConnectionContext());
         result.add(executionContext);
-        // TODO support logical SQL optimize to generate multiple logical SQL
         return result;
     }
     
