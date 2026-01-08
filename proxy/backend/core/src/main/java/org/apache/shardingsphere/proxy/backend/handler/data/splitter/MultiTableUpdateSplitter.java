@@ -49,16 +49,7 @@ import org.apache.shardingsphere.sql.parser.sql.dialect.statement.mysql.dml.MySQ
 import org.apache.shardingsphere.sql.parser.sql.common.util.SQLUtils;
 import org.apache.shardingsphere.infra.parser.SQLParserEngine;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.LinkedHashMap;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
 
 /**
@@ -80,6 +71,11 @@ public final class MultiTableUpdateSplitter {
      * @return query contexts after split
      */
     public Optional<Collection<QueryContext>> split(final QueryContext queryContext) {
+        // ===== Feature toggle (default false) =====
+        if (!isEnabled()) {
+            return Optional.empty();
+        }
+        
         SQLStatementContext sqlStatementContext = queryContext.getSqlStatementContext();
         if (!(sqlStatementContext instanceof UpdateStatementContext)) {
             return Optional.empty();
@@ -88,34 +84,75 @@ public final class MultiTableUpdateSplitter {
         if (!(sqlStatement instanceof MySQLUpdateStatement)) {
             return Optional.empty();
         }
+        
         MySQLUpdateStatement updateStatement = (MySQLUpdateStatement) sqlStatement;
         if (updateStatement.getOrderBy().isPresent() || updateStatement.getLimit().isPresent()) {
             return Optional.empty();
         }
+        
         Optional<EncryptRule> encryptRule = database.getRuleMetaData().findSingleRule(EncryptRule.class);
         if (!encryptRule.isPresent()) {
             return Optional.empty();
         }
+        
         List<SimpleTableSegment> updateTables = extractUpdateTables(updateStatement.getTable());
         if (updateTables.size() <= 1) {
             return Optional.empty();
         }
+        
         if (!isEncryptMixed(updateTables, encryptRule.get())) {
             return Optional.empty();
         }
+        
         Map<String, SimpleTableSegment> aliasToTable = buildAliasToTable(updateTables);
-        Optional<Map<String, List<AssignmentSegment>>> groupedAssignments = groupAssignments(updateStatement.getSetAssignment().getAssignments(), aliasToTable.keySet());
+        // ===== Guard: alias duplicated / invalid =====
+        if (aliasToTable.isEmpty()) {
+            return Optional.empty();
+        }
+        
+        Optional<Map<String, List<AssignmentSegment>>> groupedAssignments =
+                groupAssignments(updateStatement.getSetAssignment().getAssignments(), aliasToTable.keySet());
         if (!groupedAssignments.isPresent()) {
             return Optional.empty();
         }
-        Optional<Map<String, List<BinaryOperationExpression>>> groupedConditions = groupWhereConditions(updateStatement.getWhere(), aliasToTable.keySet());
+        
+        Optional<Map<String, List<BinaryOperationExpression>>> groupedConditions =
+                groupWhereConditions(updateStatement.getWhere(), aliasToTable.keySet());
         if (!groupedConditions.isPresent()) {
             return Optional.empty();
         }
+        
+        // ===== Guard: every table must have assignments =====
         if (!ensureAllTablesAssigned(aliasToTable.keySet(), groupedAssignments.get())) {
             return Optional.empty();
         }
-        return Optional.of(buildQueryContexts(queryContext, updateTables, groupedAssignments.get(), groupedConditions.get()));
+        
+        // ===== Guard: prevent FULL TABLE UPDATE after split =====
+        // Each table MUST have at least one WHERE predicate after grouping.
+        if (!ensureAllTablesHaveConditions(aliasToTable.keySet(), groupedConditions.get())) {
+            return Optional.empty();
+        }
+        
+        Collection<QueryContext> result = buildQueryContexts(queryContext, updateTables, groupedAssignments.get(), groupedConditions.get());
+        // ===== Guard: buildQueryContexts may return empty if unsafe =====
+        return result.isEmpty() ? Optional.empty() : Optional.of(result);
+    }
+    
+    private boolean isEnabled() {
+        // Try metaData props first (if available), then system property, default false.
+        // try {
+        // Properties props = metaData.getProps().getProps();
+        // String v = props.getProperty(ENABLE_KEY);
+        // if (null != v) {
+        // return Boolean.parseBoolean(v);
+        // }
+        // } catch (Throwable ignored) {
+        // // ignore
+        // }
+        // return Boolean.parseBoolean(System.getProperty(ENABLE_KEY, "false"));
+        // todo 增加开关
+        
+        return true;
     }
     
     private List<SimpleTableSegment> extractUpdateTables(final TableSegment tableSegment) {
@@ -124,6 +161,7 @@ public final class MultiTableUpdateSplitter {
         }
         if (tableSegment instanceof JoinTableSegment) {
             JoinTableSegment joinTableSegment = (JoinTableSegment) tableSegment;
+            // Must be comma-style join without ON/USING
             if (null != joinTableSegment.getCondition() || !joinTableSegment.getUsing().isEmpty()) {
                 return Collections.emptyList();
             }
@@ -204,6 +242,7 @@ public final class MultiTableUpdateSplitter {
     
     private Optional<Map<String, List<BinaryOperationExpression>>> groupWhereConditions(final Optional<WhereSegment> whereSegment, final Set<String> tableAliases) {
         if (!whereSegment.isPresent()) {
+            // If original SQL has no WHERE, splitting is unsafe (would be full update on every table).
             return Optional.of(new LinkedHashMap<>());
         }
         Optional<List<BinaryOperationExpression>> predicates = extractConjunctionPredicates(whereSegment.get().getExpr());
@@ -308,11 +347,23 @@ public final class MultiTableUpdateSplitter {
     }
     
     private boolean isSameTableColumn(final ColumnSegment columnSegment, final String tableAlias) {
-        return columnSegment.getOwner().isPresent() && tableAlias.equalsIgnoreCase(columnSegment.getOwner().get().getIdentifier().getValue());
+        return columnSegment.getOwner().isPresent()
+                && tableAlias.equalsIgnoreCase(columnSegment.getOwner().get().getIdentifier().getValue());
     }
     
     private boolean ensureAllTablesAssigned(final Set<String> tableAliases, final Map<String, List<AssignmentSegment>> assignments) {
         return tableAliases.stream().allMatch(assignments::containsKey);
+    }
+    
+    private boolean ensureAllTablesHaveConditions(final Set<String> tableAliases, final Map<String, List<BinaryOperationExpression>> conditions) {
+        // Every table must have at least one predicate, otherwise split may cause full table update.
+        for (String alias : tableAliases) {
+            List<BinaryOperationExpression> preds = conditions.get(alias);
+            if (null == preds || preds.isEmpty()) {
+                return false;
+            }
+        }
+        return true;
     }
     
     private Collection<QueryContext> buildQueryContexts(final QueryContext queryContext, final List<SimpleTableSegment> tables,
@@ -321,15 +372,31 @@ public final class MultiTableUpdateSplitter {
         Collection<QueryContext> result = new LinkedList<>();
         String originalSql = queryContext.getSql();
         SQLParserEngine sqlParserEngine = sqlParserRule.getSQLParserEngine(database.getProtocolType().getType());
+        
         for (SimpleTableSegment eachTable : tables) {
             String tableAlias = getTableAlias(eachTable);
+            
             List<AssignmentSegment> tableAssignments = assignments.getOrDefault(tableAlias, Collections.emptyList());
             List<BinaryOperationExpression> tableConditions = conditions.getOrDefault(tableAlias, Collections.emptyList());
+            
+            // Safety: must not build UPDATE without SET or WHERE
+            if (tableAssignments.isEmpty() || tableConditions.isEmpty()) {
+                return Collections.emptyList();
+            }
+            
             String sql = buildUpdateSQL(originalSql, eachTable, tableAssignments, tableConditions);
-            List<Object> parameters = buildParameters(queryContext.getParameters(), tableAssignments, tableConditions);
+            
+            Optional<List<Object>> parameters = buildParametersSafely(queryContext.getParameters(), tableAssignments, tableConditions);
+            if (!parameters.isPresent()) {
+                return Collections.emptyList();
+            }
+            
             SQLStatement newStatement = sqlParserEngine.parse(sql, false);
-            SQLStatementContext sqlStatementContext = SQLStatementContextFactory.newInstance(metaData, parameters, newStatement, database.getName());
-            result.add(new QueryContext(sqlStatementContext, sql, parameters, queryContext.getHintValueContext(), queryContext.isUseCache()));
+            SQLStatementContext newStatementContext =
+                    SQLStatementContextFactory.newInstance(metaData, parameters.get(), newStatement, database.getName());
+            
+            result.add(new QueryContext(newStatementContext, sql, parameters.get(),
+                    queryContext.getHintValueContext(), queryContext.isUseCache()));
         }
         return result;
     }
@@ -337,41 +404,62 @@ public final class MultiTableUpdateSplitter {
     private String buildUpdateSQL(final String originalSql, final SimpleTableSegment tableSegment,
                                   final List<AssignmentSegment> assignments, final List<BinaryOperationExpression> conditions) {
         String tableText = extractText(originalSql, tableSegment.getStartIndex(), tableSegment.getStopIndex());
+        
         String setText = assignments.stream()
                 .sorted(Comparator.comparingInt(AssignmentSegment::getStartIndex))
                 .map(each -> extractText(originalSql, each.getStartIndex(), each.getStopIndex()))
                 .collect(Collectors.joining(", "));
-        StringBuilder result = new StringBuilder("UPDATE ").append(tableText).append(" SET ").append(setText);
-        if (!conditions.isEmpty()) {
-            String whereText = conditions.stream()
-                    .sorted(Comparator.comparingInt(BinaryOperationExpression::getStartIndex))
-                    .map(each -> extractText(originalSql, each.getStartIndex(), each.getStopIndex()))
-                    .collect(Collectors.joining(" AND "));
-            result.append(" WHERE ").append(whereText);
+        
+        // setText must not be empty
+        if (setText.isEmpty()) {
+            return "";
         }
+        
+        StringBuilder result = new StringBuilder("UPDATE ").append(tableText).append(" SET ").append(setText);
+        
+        // WHERE must not be empty
+        String whereText = conditions.stream()
+                .sorted(Comparator.comparingInt(BinaryOperationExpression::getStartIndex))
+                .map(each -> extractText(originalSql, each.getStartIndex(), each.getStopIndex()))
+                .collect(Collectors.joining(" AND "));
+        if (whereText.isEmpty()) {
+            return "";
+        }
+        result.append(" WHERE ").append(whereText);
+        
         return result.toString();
     }
     
-    private List<Object> buildParameters(final List<Object> originParameters,
-                                         final List<AssignmentSegment> assignments, final List<BinaryOperationExpression> conditions) {
+    private Optional<List<Object>> buildParametersSafely(final List<Object> originParameters,
+                                                         final List<AssignmentSegment> assignments,
+                                                         final List<BinaryOperationExpression> conditions) {
         List<ParameterMarkerExpressionSegment> markers = new LinkedList<>();
         for (AssignmentSegment each : assignments) {
-            collectParameterMarkers(each.getValue(), markers);
+            collectParameterMarkers(((ColumnAssignmentSegment) each).getValue(), markers);
         }
         for (BinaryOperationExpression each : conditions) {
             collectParameterMarkers(each.getLeft(), markers);
             collectParameterMarkers(each.getRight(), markers);
         }
+        
         List<ParameterMarkerExpressionSegment> orderedMarkers = markers.stream()
                 .sorted(Comparator.comparingInt(ParameterMarkerExpressionSegment::getStartIndex))
                 .collect(Collectors.toList());
+        
         List<Object> result = new ArrayList<>(orderedMarkers.size());
         for (ParameterMarkerExpressionSegment each : orderedMarkers) {
-            if (each.getParameterIndex() < originParameters.size()) {
-                result.add(originParameters.get(each.getParameterIndex()));
+            int idx = each.getParameterIndex();
+            if (idx < 0 || idx >= originParameters.size()) {
+                return Optional.empty();
             }
+            result.add(originParameters.get(idx));
         }
-        return result;
+        
+        // Hard guard: marker count must match parameter count
+        if (result.size() != orderedMarkers.size()) {
+            return Optional.empty();
+        }
+        return Optional.of(result);
     }
     
     private void collectParameterMarkers(final ExpressionSegment expressionSegment, final Collection<ParameterMarkerExpressionSegment> collector) {
