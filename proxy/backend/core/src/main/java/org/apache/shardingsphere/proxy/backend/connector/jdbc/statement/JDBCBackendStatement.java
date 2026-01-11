@@ -30,13 +30,18 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Types;
+import java.util.Locale;
 import java.util.List;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * JDBC backend statement.
  */
 public final class JDBCBackendStatement implements ExecutorJDBCStatementManager {
+    
+    private static final Pattern TABLE_SCHEMA_PATTERN = Pattern.compile("(?i)`?table_schema`?\\s*=\\s*'([^']+)'");
     
     @Override
     public Statement createStorageResource(final Connection connection, final ConnectionMode connectionMode, final StatementOption option, final DatabaseType databaseType) throws SQLException {
@@ -52,6 +57,18 @@ public final class JDBCBackendStatement implements ExecutorJDBCStatementManager 
                                            final DatabaseType databaseType) throws SQLException {
         String sql = executionUnit.getSqlUnit().getSql();
         List<Object> params = executionUnit.getSqlUnit().getParameters();
+        Optional<String> targetCatalog = findTargetCatalog(sql);
+        if (targetCatalog.isPresent()) {
+            boolean setCatalogSuccess = false;
+            try {
+                connection.setCatalog(targetCatalog.get());
+                setCatalogSuccess = true;
+            } catch (final SQLException ex) {
+                System.err.println("Failed to set catalog before executing SQL: " + ex.getMessage());
+            }
+            System.out.println("Information schema rule hit: sql=" + sql + ", targetDb=" + targetCatalog.get()
+                    + ", dataSourceName=" + executionUnit.getDataSourceName() + ", setCatalogSuccess=" + setCatalogSuccess);
+        }
         PreparedStatement result = option.isReturnGeneratedKeys()
                 ? connection.prepareStatement(executionUnit.getSqlUnit().getSql(), Statement.RETURN_GENERATED_KEYS)
                 : connection.prepareStatement(sql);
@@ -74,5 +91,16 @@ public final class JDBCBackendStatement implements ExecutorJDBCStatementManager 
         if (fetchSizeSetter.isPresent()) {
             fetchSizeSetter.get().setFetchSize(statement);
         }
+    }
+    
+    private Optional<String> findTargetCatalog(final String sql) {
+        if (null == sql || !sql.toLowerCase(Locale.ENGLISH).contains("information_schema")) {
+            return Optional.empty();
+        }
+        Matcher matcher = TABLE_SCHEMA_PATTERN.matcher(sql);
+        if (matcher.find()) {
+            return Optional.ofNullable(matcher.group(1));
+        }
+        return Optional.empty();
     }
 }
