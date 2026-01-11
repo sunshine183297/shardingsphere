@@ -43,6 +43,8 @@ public final class SQLLogger {
      * @param executionContext Execution context
      */
     public static void logSQL(final QueryContext queryContext, final boolean showSimple, final ExecutionContext executionContext) {
+        boolean hasLogicSql = null != queryContext.getSql() && !queryContext.getSql().isEmpty();
+        System.out.println("[SQL-LOGGER] logicSQL logged=" + hasLogicSql + ", actualSQLCount=" + executionContext.getExecutionUnits().size());
         log("Logic SQL: {}", queryContext.getSql());
         if (showSimple) {
             logSimpleMode(executionContext.getExecutionUnits());

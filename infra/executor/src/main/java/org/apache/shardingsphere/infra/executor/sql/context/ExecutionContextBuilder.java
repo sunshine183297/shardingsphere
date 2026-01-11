@@ -52,9 +52,11 @@ public final class ExecutionContextBuilder {
      * @return execution contexts
      */
     public static Collection<ExecutionUnit> build(final ShardingSphereDatabase database, final SQLRewriteResult sqlRewriteResult, final SQLStatementContext sqlStatementContext) {
-        return sqlRewriteResult instanceof GenericSQLRewriteResult
+        Collection<ExecutionUnit> executionUnits = sqlRewriteResult instanceof GenericSQLRewriteResult
                 ? build(database, (GenericSQLRewriteResult) sqlRewriteResult, sqlStatementContext)
                 : build((RouteSQLRewriteResult) sqlRewriteResult);
+        System.out.println("[EXECUTION-CONTEXT] executionUnits size=" + executionUnits.size() + ", db=" + database.getName());
+        return executionUnits;
     }
     
     private static Collection<ExecutionUnit> build(final ShardingSphereDatabase database,

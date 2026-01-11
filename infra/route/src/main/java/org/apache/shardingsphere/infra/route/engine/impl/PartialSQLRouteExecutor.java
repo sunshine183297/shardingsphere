@@ -21,6 +21,7 @@ import org.apache.shardingsphere.infra.config.props.ConfigurationProperties;
 import org.apache.shardingsphere.infra.hint.HintManager;
 import org.apache.shardingsphere.infra.hint.HintValueContext;
 import org.apache.shardingsphere.infra.hint.SQLHintDataSourceNotExistsException;
+import org.apache.shardingsphere.infra.metadata.database.schema.util.SystemSchemaUtils;
 import org.apache.shardingsphere.infra.metadata.database.ShardingSphereDatabase;
 import org.apache.shardingsphere.infra.metadata.database.rule.ShardingSphereRuleMetaData;
 import org.apache.shardingsphere.infra.route.SQLRouter;
@@ -39,6 +40,8 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Partial SQL route executor.
@@ -62,6 +65,10 @@ public final class PartialSQLRouteExecutor implements SQLRouteExecutor {
         Optional<String> dataSourceName = findDataSourceByHint(queryContext.getHintValueContext(), database.getResourceMetaData().getDataSources());
         if (dataSourceName.isPresent()) {
             result.getRouteUnits().add(new RouteUnit(new RouteMapper(dataSourceName.get(), dataSourceName.get()), Collections.emptyList()));
+            System.out.println("[ROUTE] routeUnits size=" + result.getRouteUnits().size());
+            for (RouteUnit each : result.getRouteUnits()) {
+                System.out.println("[ROUTE] routeUnit dataSource=" + each.getDataSourceMapper().getActualName());
+            }
             return result;
         }
         for (Entry<ShardingSphereRule, SQLRouter> entry : routers.entrySet()) {
@@ -74,6 +81,21 @@ public final class PartialSQLRouteExecutor implements SQLRouteExecutor {
         if (result.getRouteUnits().isEmpty() && 1 == database.getResourceMetaData().getDataSources().size()) {
             String singleDataSourceName = database.getResourceMetaData().getDataSources().keySet().iterator().next();
             result.getRouteUnits().add(new RouteUnit(new RouteMapper(singleDataSourceName, singleDataSourceName), Collections.emptyList()));
+        }
+        if (result.getRouteUnits().isEmpty()
+                && SystemSchemaUtils.containsSystemSchema(queryContext.getSqlStatementContext().getDatabaseType(),
+                        queryContext.getSqlStatementContext().getTablesContext().getSchemaNames(), database)) {
+            Optional<String> tableSchema = findTableSchema(queryContext.getSql());
+            if (tableSchema.isPresent() && database.getResourceMetaData().getDataSources().containsKey(tableSchema.get())) {
+                result.getRouteUnits().add(new RouteUnit(new RouteMapper(tableSchema.get(), tableSchema.get()), Collections.emptyList()));
+            } else {
+                System.err.println("[ROUTE][SYSTEM-SCHEMA-FALLBACK] missing TABLE_SCHEMA or storage unit, sql=" + queryContext.getSql()
+                        + ", tableSchema=" + tableSchema.orElse("null"));
+            }
+        }
+        System.out.println("[ROUTE] routeUnits size=" + result.getRouteUnits().size());
+        for (RouteUnit each : result.getRouteUnits()) {
+            System.out.println("[ROUTE] routeUnit dataSource=" + each.getDataSourceMapper().getActualName());
         }
         return result;
     }
@@ -89,5 +111,11 @@ public final class PartialSQLRouteExecutor implements SQLRouteExecutor {
             throw new SQLHintDataSourceNotExistsException(result.get());
         }
         return result;
+    }
+
+    private Optional<String> findTableSchema(final String sql) {
+        Pattern pattern = Pattern.compile("(?i)table_schema\\s*=\\s*[`']?([^`'\\s]+)[`']?");
+        Matcher matcher = pattern.matcher(sql);
+        return matcher.find() ? Optional.of(matcher.group(1)) : Optional.empty();
     }
 }
