@@ -62,6 +62,10 @@ public final class PartialSQLRouteExecutor implements SQLRouteExecutor {
         Optional<String> dataSourceName = findDataSourceByHint(queryContext.getHintValueContext(), database.getResourceMetaData().getDataSources());
         if (dataSourceName.isPresent()) {
             result.getRouteUnits().add(new RouteUnit(new RouteMapper(dataSourceName.get(), dataSourceName.get()), Collections.emptyList()));
+            System.out.println("[ROUTE] routeUnits size=" + result.getRouteUnits().size());
+            for (RouteUnit each : result.getRouteUnits()) {
+                System.out.println("[ROUTE] routeUnit dataSource=" + each.getDataSourceMapper().getActualName());
+            }
             return result;
         }
         for (Entry<ShardingSphereRule, SQLRouter> entry : routers.entrySet()) {
@@ -74,6 +78,10 @@ public final class PartialSQLRouteExecutor implements SQLRouteExecutor {
         if (result.getRouteUnits().isEmpty() && 1 == database.getResourceMetaData().getDataSources().size()) {
             String singleDataSourceName = database.getResourceMetaData().getDataSources().keySet().iterator().next();
             result.getRouteUnits().add(new RouteUnit(new RouteMapper(singleDataSourceName, singleDataSourceName), Collections.emptyList()));
+        }
+        System.out.println("[ROUTE] routeUnits size=" + result.getRouteUnits().size());
+        for (RouteUnit each : result.getRouteUnits()) {
+            System.out.println("[ROUTE] routeUnit dataSource=" + each.getDataSourceMapper().getActualName());
         }
         return result;
     }

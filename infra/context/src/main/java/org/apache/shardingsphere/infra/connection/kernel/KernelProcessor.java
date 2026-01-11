@@ -22,6 +22,7 @@ import org.apache.shardingsphere.infra.config.props.ConfigurationPropertyKey;
 import org.apache.shardingsphere.infra.executor.sql.context.ExecutionContext;
 import org.apache.shardingsphere.infra.executor.sql.context.ExecutionContextBuilder;
 import org.apache.shardingsphere.infra.executor.sql.log.SQLLogger;
+import org.apache.shardingsphere.infra.metadata.database.schema.util.SystemSchemaUtils;
 import org.apache.shardingsphere.infra.metadata.database.ShardingSphereDatabase;
 import org.apache.shardingsphere.infra.metadata.database.rule.ShardingSphereRuleMetaData;
 import org.apache.shardingsphere.infra.rewrite.SQLRewriteEntry;
@@ -48,6 +49,11 @@ public final class KernelProcessor {
      */
     public ExecutionContext generateExecutionContext(final QueryContext queryContext, final ShardingSphereDatabase database, final ShardingSphereRuleMetaData globalRuleMetaData,
                                                      final ConfigurationProperties props, final ConnectionContext connectionContext) {
+        boolean isSystemSchema = SystemSchemaUtils.containsSystemSchema(queryContext.getSqlStatementContext().getDatabaseType(),
+                queryContext.getSqlStatementContext().getTablesContext().getSchemaNames(), database);
+        System.out.println("[SYSTEM-SCHEMA][ENTER] sql=" + queryContext.getSql()
+                + ", db=" + database.getName()
+                + ", isSystemSchema=" + isSystemSchema);
         RouteContext routeContext = route(queryContext, database, globalRuleMetaData, props, connectionContext);
         SQLRewriteResult rewriteResult = rewrite(queryContext, database, globalRuleMetaData, props, routeContext, connectionContext);
         ExecutionContext result = createExecutionContext(queryContext, database, routeContext, rewriteResult);
