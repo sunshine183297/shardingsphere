@@ -106,7 +106,8 @@ public final class PreviewExecutor implements ConnectionSessionRequiredRULExecut
                 new JDBCExecutor(BackendExecutorContext.getInstance().getExecutorEngine(), connectionSession.getConnectionContext()));
         Collection<ExecutionUnit> executionUnits = isUseFederation(queryContext, metaDataContexts, connectionSession, sqlFederationEngine)
                 ? getFederationExecutionUnits(queryContext, metaDataContexts, connectionSession, sqlFederationEngine)
-                : kernelProcessor.generateExecutionContext(queryContext, database, globalRuleMetaData, props, connectionSession.getConnectionContext()).getExecutionUnits();
+                : kernelProcessor.generateExecutionContext(queryContext, database, metaDataContexts.getMetaData(), globalRuleMetaData, props,
+                        connectionSession.getConnectionContext()).getExecutionUnits();
         return executionUnits.stream().map(this::buildRow).collect(Collectors.toList());
     }
     

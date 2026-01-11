@@ -131,7 +131,8 @@ public final class MySQLMultiStatementsHandler implements ProxyBackendHandler {
         ShardingSphereRuleMetaData globalRuleMetaData = metaDataContexts.getMetaData().getGlobalRuleMetaData();
         ShardingSphereDatabase currentDatabase = metaDataContexts.getMetaData().getDatabase(connectionSession.getDatabaseName());
         SQLAuditEngine.audit(queryContext.getSqlStatementContext(), queryContext.getParameters(), globalRuleMetaData, currentDatabase, null, queryContext.getHintValueContext());
-        return kernelProcessor.generateExecutionContext(queryContext, currentDatabase, globalRuleMetaData, metaDataContexts.getMetaData().getProps(), connectionSession.getConnectionContext());
+        return kernelProcessor.generateExecutionContext(queryContext, currentDatabase, metaDataContexts.getMetaData(), globalRuleMetaData,
+                metaDataContexts.getMetaData().getProps(), connectionSession.getConnectionContext());
     }
     
     @Override

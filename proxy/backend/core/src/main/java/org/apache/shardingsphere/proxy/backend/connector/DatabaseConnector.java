@@ -180,14 +180,16 @@ public final class DatabaseConnector implements DatabaseBackendHandler {
         Optional<Collection<QueryContext>> splitQueryContexts = splitter.split(queryContext);
         if (splitQueryContexts.isPresent()) {
             for (QueryContext each : splitQueryContexts.get()) {
-                ExecutionContext executionContext = new KernelProcessor().generateExecutionContext(each, database, metaDataContexts.getMetaData().getGlobalRuleMetaData(),
-                        metaDataContexts.getMetaData().getProps(), databaseConnectionManager.getConnectionSession().getConnectionContext());
+                ExecutionContext executionContext = new KernelProcessor().generateExecutionContext(each, database, metaDataContexts.getMetaData(),
+                        metaDataContexts.getMetaData().getGlobalRuleMetaData(), metaDataContexts.getMetaData().getProps(),
+                        databaseConnectionManager.getConnectionSession().getConnectionContext());
                 result.add(executionContext);
             }
             return result;
         }
-        ExecutionContext executionContext = new KernelProcessor().generateExecutionContext(queryContext, database, metaDataContexts.getMetaData().getGlobalRuleMetaData(),
-                metaDataContexts.getMetaData().getProps(), databaseConnectionManager.getConnectionSession().getConnectionContext());
+        ExecutionContext executionContext = new KernelProcessor().generateExecutionContext(queryContext, database, metaDataContexts.getMetaData(),
+                metaDataContexts.getMetaData().getGlobalRuleMetaData(), metaDataContexts.getMetaData().getProps(),
+                databaseConnectionManager.getConnectionSession().getConnectionContext());
         result.add(executionContext);
         return result;
     }

@@ -144,7 +144,8 @@ public final class EnumerablePushDownTableScanExecutor {
         SQLFederationExecutorContext federationContext = executorContext.getFederationContext();
         QueryContext queryContext = createQueryContext(federationContext.getMetaData(), sqlString, databaseType, federationContext.getQueryContext().isUseCache());
         ShardingSphereDatabase database = federationContext.getMetaData().getDatabase(databaseName);
-        ExecutionContext context = new KernelProcessor().generateExecutionContext(queryContext, database, globalRuleMetaData, executorContext.getProps(), new ConnectionContext());
+        ExecutionContext context = new KernelProcessor().generateExecutionContext(queryContext, database, federationContext.getMetaData(), globalRuleMetaData,
+                executorContext.getProps(), new ConnectionContext());
         if (federationContext.isPreview()) {
             federationContext.getExecutionUnits().addAll(context.getExecutionUnits());
             return createEmptyScalarEnumerable();
@@ -236,7 +237,8 @@ public final class EnumerablePushDownTableScanExecutor {
         SQLFederationExecutorContext federationContext = executorContext.getFederationContext();
         QueryContext queryContext = createQueryContext(federationContext.getMetaData(), sqlString, databaseType, federationContext.getQueryContext().isUseCache());
         ShardingSphereDatabase database = federationContext.getMetaData().getDatabase(databaseName);
-        ExecutionContext context = new KernelProcessor().generateExecutionContext(queryContext, database, globalRuleMetaData, executorContext.getProps(), new ConnectionContext());
+        ExecutionContext context = new KernelProcessor().generateExecutionContext(queryContext, database, federationContext.getMetaData(), globalRuleMetaData,
+                executorContext.getProps(), new ConnectionContext());
         if (federationContext.isPreview()) {
             federationContext.getExecutionUnits().addAll(context.getExecutionUnits());
             return createEmptyEnumerable();

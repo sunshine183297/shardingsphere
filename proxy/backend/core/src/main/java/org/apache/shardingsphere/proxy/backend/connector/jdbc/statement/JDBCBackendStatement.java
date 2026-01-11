@@ -59,15 +59,7 @@ public final class JDBCBackendStatement implements ExecutorJDBCStatementManager 
         List<Object> params = executionUnit.getSqlUnit().getParameters();
         Optional<String> targetCatalog = findTargetCatalog(sql);
         if (targetCatalog.isPresent()) {
-            boolean setCatalogSuccess = false;
-            try {
-                connection.setCatalog(targetCatalog.get());
-                setCatalogSuccess = true;
-            } catch (final SQLException ex) {
-                System.err.println("Failed to set catalog before executing SQL: " + ex.getMessage());
-            }
-            System.out.println("Information schema rule hit: sql=" + sql + ", targetDb=" + targetCatalog.get()
-                    + ", dataSourceName=" + executionUnit.getDataSourceName() + ", setCatalogSuccess=" + setCatalogSuccess);
+            ensureCatalog(connection, targetCatalog.get());
         }
         PreparedStatement result = option.isReturnGeneratedKeys()
                 ? connection.prepareStatement(executionUnit.getSqlUnit().getSql(), Statement.RETURN_GENERATED_KEYS)
@@ -102,5 +94,29 @@ public final class JDBCBackendStatement implements ExecutorJDBCStatementManager 
             return Optional.ofNullable(matcher.group(1));
         }
         return Optional.empty();
+    }
+    
+    private void ensureCatalog(final Connection connection, final String targetCatalog) throws SQLException {
+        boolean catalogMatched = false;
+        try {
+            connection.setCatalog(targetCatalog);
+        } catch (final SQLException ignored) {
+            // Ignore and fall back to explicit USE statement if needed.
+        }
+        try {
+            String currentCatalog = connection.getCatalog();
+            catalogMatched = null != currentCatalog && targetCatalog.equalsIgnoreCase(currentCatalog);
+        } catch (final SQLException ignored) {
+            // Ignore and fall back to explicit USE statement if needed.
+        }
+        if (!catalogMatched) {
+            try (Statement statement = connection.createStatement()) {
+                statement.execute(String.format("USE `%s`", escapeBackticks(targetCatalog)));
+            }
+        }
+    }
+    
+    private String escapeBackticks(final String value) {
+        return value.replace("`", "``");
     }
 }

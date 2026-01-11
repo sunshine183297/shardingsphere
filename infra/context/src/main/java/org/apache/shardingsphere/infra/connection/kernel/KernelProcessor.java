@@ -22,8 +22,9 @@ import org.apache.shardingsphere.infra.config.props.ConfigurationPropertyKey;
 import org.apache.shardingsphere.infra.executor.sql.context.ExecutionContext;
 import org.apache.shardingsphere.infra.executor.sql.context.ExecutionContextBuilder;
 import org.apache.shardingsphere.infra.executor.sql.log.SQLLogger;
-import org.apache.shardingsphere.infra.metadata.database.schema.util.SystemSchemaUtils;
+import org.apache.shardingsphere.infra.metadata.ShardingSphereMetaData;
 import org.apache.shardingsphere.infra.metadata.database.ShardingSphereDatabase;
+import org.apache.shardingsphere.infra.metadata.database.schema.util.SystemSchemaUtils;
 import org.apache.shardingsphere.infra.metadata.database.rule.ShardingSphereRuleMetaData;
 import org.apache.shardingsphere.infra.rewrite.SQLRewriteEntry;
 import org.apache.shardingsphere.infra.rewrite.engine.result.SQLRewriteResult;
@@ -32,31 +33,36 @@ import org.apache.shardingsphere.infra.route.engine.SQLRouteEngine;
 import org.apache.shardingsphere.infra.session.connection.ConnectionContext;
 import org.apache.shardingsphere.infra.session.query.QueryContext;
 
+import java.util.Locale;
+import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 /**
  * Kernel processor.
  */
 public final class KernelProcessor {
+    
+    private static final Pattern TABLE_SCHEMA_PATTERN = Pattern.compile("(?i)`?table_schema`?\\s*=\\s*'([^']+)'");
     
     /**
      * Generate execution context.
      *
      * @param queryContext query context
      * @param database database
+     * @param metaData meta data
      * @param globalRuleMetaData global rule meta data
      * @param props configuration properties
      * @param connectionContext connection context
      * @return execution context
      */
-    public ExecutionContext generateExecutionContext(final QueryContext queryContext, final ShardingSphereDatabase database, final ShardingSphereRuleMetaData globalRuleMetaData,
+    public ExecutionContext generateExecutionContext(final QueryContext queryContext, final ShardingSphereDatabase database, final ShardingSphereMetaData metaData,
+                                                     final ShardingSphereRuleMetaData globalRuleMetaData,
                                                      final ConfigurationProperties props, final ConnectionContext connectionContext) {
-        boolean isSystemSchema = SystemSchemaUtils.containsSystemSchema(queryContext.getSqlStatementContext().getDatabaseType(),
-                queryContext.getSqlStatementContext().getTablesContext().getSchemaNames(), database);
-        System.out.println("[SYSTEM-SCHEMA][ENTER] sql=" + queryContext.getSql()
-                + ", db=" + database.getName()
-                + ", isSystemSchema=" + isSystemSchema);
-        RouteContext routeContext = route(queryContext, database, globalRuleMetaData, props, connectionContext);
-        SQLRewriteResult rewriteResult = rewrite(queryContext, database, globalRuleMetaData, props, routeContext, connectionContext);
-        ExecutionContext result = createExecutionContext(queryContext, database, routeContext, rewriteResult);
+        ShardingSphereDatabase targetDatabase = getTargetDatabase(queryContext, database, metaData);
+        RouteContext routeContext = route(queryContext, targetDatabase, globalRuleMetaData, props, connectionContext);
+        SQLRewriteResult rewriteResult = rewrite(queryContext, targetDatabase, globalRuleMetaData, props, routeContext, connectionContext);
+        ExecutionContext result = createExecutionContext(queryContext, targetDatabase, routeContext, rewriteResult);
         logSQL(queryContext, props, result);
         return result;
     }
@@ -80,5 +86,33 @@ public final class KernelProcessor {
         if (props.<Boolean>getValue(ConfigurationPropertyKey.SQL_SHOW)) {
             SQLLogger.logSQL(queryContext, props.<Boolean>getValue(ConfigurationPropertyKey.SQL_SIMPLE), executionContext);
         }
+    }
+    
+    private ShardingSphereDatabase getTargetDatabase(final QueryContext queryContext, final ShardingSphereDatabase database, final ShardingSphereMetaData metaData) {
+        if (!isInformationSchemaQuery(queryContext, database)) {
+            return database;
+        }
+        Optional<String> tableSchema = findTableSchema(queryContext.getSql());
+        if (!tableSchema.isPresent() || !metaData.containsDatabase(tableSchema.get())) {
+            return database;
+        }
+        ShardingSphereDatabase targetDatabase = metaData.getDatabase(tableSchema.get());
+        return targetDatabase.containsDataSource() ? targetDatabase : database;
+    }
+    
+    private boolean isInformationSchemaQuery(final QueryContext queryContext, final ShardingSphereDatabase database) {
+        if (!SystemSchemaUtils.containsSystemSchema(queryContext.getSqlStatementContext().getDatabaseType(),
+                queryContext.getSqlStatementContext().getTablesContext().getSchemaNames(), database)) {
+            return false;
+        }
+        return queryContext.getSql().toLowerCase(Locale.ENGLISH).contains("information_schema");
+    }
+    
+    private Optional<String> findTableSchema(final String sql) {
+        if (null == sql) {
+            return Optional.empty();
+        }
+        Matcher matcher = TABLE_SCHEMA_PATTERN.matcher(sql);
+        return matcher.find() ? Optional.ofNullable(matcher.group(1)) : Optional.empty();
     }
 }
