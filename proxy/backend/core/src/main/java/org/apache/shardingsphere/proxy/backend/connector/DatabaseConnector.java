@@ -240,6 +240,7 @@ public final class DatabaseConnector implements DatabaseBackendHandler {
     @SuppressWarnings({"unchecked", "rawtypes"})
     private ResponseHeader doExecute(final ExecutionContext executionContext) throws SQLException {
         if (executionContext.getExecutionUnits().isEmpty()) {
+            System.err.println("[EXECUTION][SHORT-CIRCUIT] executionUnits EMPTY -> return UpdateResponseHeader");
             return new UpdateResponseHeader(executionContext.getSqlStatementContext().getSqlStatement());
         }
         proxySQLExecutor.checkExecutePrerequisites(executionContext);
