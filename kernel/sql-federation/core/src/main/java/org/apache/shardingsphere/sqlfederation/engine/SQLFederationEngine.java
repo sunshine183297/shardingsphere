@@ -25,6 +25,7 @@ import org.apache.calcite.runtime.Bindable;
 import org.apache.calcite.schema.Schema;
 import org.apache.calcite.schema.Table;
 import org.apache.shardingsphere.dialect.exception.syntax.table.NoSuchTableException;
+import org.apache.shardingsphere.infra.binder.segment.table.TablesContext;
 import org.apache.shardingsphere.infra.binder.statement.SQLStatementContext;
 import org.apache.shardingsphere.infra.binder.statement.dml.SelectStatementContext;
 import org.apache.shardingsphere.infra.datanode.DataNode;
@@ -118,7 +119,8 @@ public final class SQLFederationEngine implements AutoCloseable {
                           final ShardingSphereDatabase database, final ShardingSphereRuleMetaData globalRuleMetaData) {
         // TODO BEGIN: move this logic to SQLFederationDecider implement class when we remove sql federation type
         if (isQuerySystemSchema(sqlStatementContext, database)) {
-            return true;
+            boolean bypass = isInformationSchemaColumns(sqlStatementContext);
+            return !bypass;
         }
         // TODO END
         boolean sqlFederationEnabled = sqlFederationRule.getConfiguration().isSqlFederationEnabled();
@@ -131,6 +133,42 @@ public final class SQLFederationEngine implements AutoCloseable {
             if (isUseSQLFederation) {
                 return true;
             }
+        }
+        return false;
+    }
+    
+    private boolean isInformationSchemaColumns(final SQLStatementContext sqlStatementContext) {
+        // 只对 SELECT 处理，避免误伤
+        if (!(sqlStatementContext instanceof SelectStatementContext)) {
+            return false;
+        }
+        TablesContext tablesContext = sqlStatementContext.getTablesContext();
+        if (null == tablesContext) {
+            return false;
+        }
+        
+        // 1) schema/db 名（如果能拿到）
+        String dbName = null;
+        try {
+            dbName = tablesContext.getDatabaseName().orElse(null);
+        } catch (final Throwable ignore) {
+            // 有些版本可能没有 getDatabaseName()/返回类型不同，忽略
+        }
+        if (null != dbName && !"information_schema".equalsIgnoreCase(dbName)) {
+            return false;
+        }
+        
+        // 2) 表名是否包含 COLUMNS
+        try {
+            // 常见：tablesContext.getTableNames() : Collection<String>
+            for (String tableName : tablesContext.getTableNames()) {
+                if ("COLUMNS".equalsIgnoreCase(tableName)) {
+                    // 如果 dbName 取不到（null），也允许通过表名命中（但会更宽）
+                    return true;
+                }
+            }
+        } catch (final Throwable ignore) {
+            // fallback to false，交给兜底版
         }
         return false;
     }

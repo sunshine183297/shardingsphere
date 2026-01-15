@@ -79,8 +79,13 @@ public final class EncryptSQLRewriteContextDecorator implements SQLRewriteContex
         if (!(sqlStatementContext instanceof SelectStatementContext)) {
             return Collections.emptyList();
         }
-        return new EncryptProjectionConditionEngine(encryptRule, sqlRewriteContext.getSchemas())
-                .createEncryptConditions((SelectStatementContext) sqlStatementContext, sqlRewriteContext.getDatabaseName());
+        String rawSql = sqlRewriteContext.getSql();
+        
+        return new EncryptProjectionConditionEngine(
+                encryptRule, rawSql,
+                sqlRewriteContext.getSchemas()).createEncryptConditions((SelectStatementContext) sqlStatementContext, sqlRewriteContext.getDatabaseName());
+        // return new EncryptProjectionConditionEngine(encryptRule, sqlRewriteContext.getSchemas())
+        // .createEncryptConditions((SelectStatementContext) sqlStatementContext, sqlRewriteContext.getDatabaseName());
     }
     
     private boolean containsEncryptTable(final EncryptRule encryptRule, final SQLStatementContext sqlStatementContext) {

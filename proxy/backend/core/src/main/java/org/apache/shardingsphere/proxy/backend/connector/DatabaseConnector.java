@@ -76,6 +76,7 @@ import org.apache.shardingsphere.parser.rule.SQLParserRule;
 import org.apache.shardingsphere.sqlfederation.executor.SQLFederationExecutorContext;
 import org.apache.shardingsphere.transaction.api.TransactionType;
 
+import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -88,6 +89,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Database connector.
@@ -99,6 +102,8 @@ public final class DatabaseConnector implements DatabaseBackendHandler {
     private final Collection<Statement> cachedStatements = Collections.newSetFromMap(new ConcurrentHashMap<>());
     
     private final Collection<ResultSet> cachedResultSets = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    
+    private final Collection<Connection> cachedConnections = Collections.newSetFromMap(new ConcurrentHashMap<>());
     
     private final String driverType;
     
@@ -113,6 +118,9 @@ public final class DatabaseConnector implements DatabaseBackendHandler {
     private List<QueryHeader> queryHeaders;
     
     private MergedResult mergedResult;
+    
+    private static final Pattern TABLE_SCHEMA_PATTERN = Pattern.compile("(?i)`?table_schema`?\\s*=\\s*'([^']+)'");
+    private static final Pattern INFO_SCHEMA_COLUMNS_PATTERN = Pattern.compile("(?i)from\\s+`?information_schema`?\\.\\s*`?columns`?");
     
     public DatabaseConnector(final String driverType, final ShardingSphereDatabase database, final QueryContext queryContext, final ProxyDatabaseConnectionManager databaseConnectionManager) {
         SQLStatementContext sqlStatementContext = queryContext.getSqlStatementContext();
@@ -153,6 +161,10 @@ public final class DatabaseConnector implements DatabaseBackendHandler {
      */
     public void add(final ResultSet resultSet) {
         cachedResultSets.add(resultSet);
+    }
+    
+    public void add(final Connection connection) {
+        cachedConnections.add(connection);
     }
     
     /**
@@ -240,6 +252,11 @@ public final class DatabaseConnector implements DatabaseBackendHandler {
     @SuppressWarnings({"unchecked", "rawtypes"})
     private ResponseHeader doExecute(final ExecutionContext executionContext) throws SQLException {
         if (executionContext.getExecutionUnits().isEmpty()) {
+            // ⭐ 仅对 information_schema.COLUMNS 做兜底（Mycat 依赖 USE 当前库）
+            ResponseHeader fallback = tryFallbackInformationSchemaColumnsWhenShortCircuit(executionContext);
+            if (null != fallback) {
+                return fallback;
+            }
             return new UpdateResponseHeader(executionContext.getSqlStatementContext().getSqlStatement());
         }
         proxySQLExecutor.checkExecutePrerequisites(executionContext);
@@ -464,6 +481,7 @@ public final class DatabaseConnector implements DatabaseBackendHandler {
         Collection<SQLException> result = new LinkedList<>();
         result.addAll(closeResultSets());
         result.addAll(closeStatements());
+        result.addAll(closeConnections());
         closeSQLFederationEngine().ifPresent(result::add);
         if (result.isEmpty()) {
             return;
@@ -510,4 +528,134 @@ public final class DatabaseConnector implements DatabaseBackendHandler {
         }
         return Optional.empty();
     }
+    
+    private ResponseHeader tryFallbackInformationSchemaColumnsWhenShortCircuit(final ExecutionContext executionContext) {
+        SQLStatementContext sqlStatementContext = executionContext.getSqlStatementContext();
+        // 只处理 SELECT + info_schema.COLUMNS
+        if (!(sqlStatementContext instanceof SelectStatementContext) || !isInformationSchemaColumns(sqlStatementContext)) {
+            return null;
+        }
+        
+        String rawSql = queryContext.getSql();
+        if (null == rawSql || rawSql.isEmpty()) {
+            return null;
+        }
+        
+        String targetDb = parseTableSchemaFromSql(rawSql);
+        if (null == targetDb || targetDb.trim().isEmpty()) {
+            targetDb = databaseConnectionManager.getConnectionSession().getDatabaseName();
+        }
+        if (null == targetDb || targetDb.trim().isEmpty()) {
+            return null;
+        }
+        
+        ShardingSphereDatabase targetDatabase = ProxyContext.getInstance().getDatabase(targetDb);
+        if (null == targetDatabase || targetDatabase.getResourceMetaData().getDataSources().isEmpty()) {
+            // System.out.println("[INFO_SCHEMA_FALLBACK] targetDb has no datasource, targetDb=" + targetDb);
+            return null;
+        }
+        
+        DataSource dataSource = targetDatabase.getResourceMetaData().getDataSources().values().iterator().next();
+        MetaDataContexts metaDataContexts = ProxyContext.getInstance().getContextManager().getMetaDataContexts();
+        
+        Connection conn = null;
+        Statement stmt = null;
+        ResultSet rs = null;
+        try {
+            conn = dataSource.getConnection();
+            add(conn); // ⭐关键：不能提前关闭，留给 close() 统一释放
+            
+            stmt = conn.createStatement();
+            add(stmt);
+            
+            String safeDb = escapeBackticks(targetDb);
+            stmt.execute("USE `" + safeDb + "`");
+            
+            rs = stmt.executeQuery(rawSql);
+            add(rs);
+            
+            // System.out.println("[INFO_SCHEMA_FALLBACK][OK] shortCircuit->fallback, targetDb=" + targetDb + ", sql=" + rawSql);
+            return processExecuteFederation(rs, metaDataContexts);
+        } catch (final Exception ex) {
+            // System.out.println("[INFO_SCHEMA_FALLBACK][FAIL] " + ex.getMessage());
+            
+            // 本次失败尽量即时释放（成功的话交给 DatabaseConnector.close()）
+            try {
+                if (null != rs) {
+                    rs.close();
+                }
+            } catch (Exception ignored) {
+            }
+            try {
+                if (null != stmt) {
+                    stmt.close();
+                }
+            } catch (Exception ignored) {
+            }
+            try {
+                if (null != conn) {
+                    conn.close();
+                }
+            } catch (Exception ignored) {
+            }
+            return null;
+        }
+    }
+    
+    /**
+     * 判断是否为 information_schema.COLUMNS 查询（解析树优先，字符串兜底）
+     */
+    private boolean isInformationSchemaColumns(final SQLStatementContext sqlStatementContext) {
+        // 解析树优先：schema=information_schema 且 table=COLUMNS
+        try {
+            if (null != sqlStatementContext.getTablesContext()) {
+                // 先看 schemaNames（更可靠）
+                boolean hitSchema = sqlStatementContext.getTablesContext().getSchemaNames().stream()
+                        .anyMatch(s -> "information_schema".equalsIgnoreCase(s));
+                if (hitSchema) {
+                    return sqlStatementContext.getTablesContext().getTableNames().stream()
+                            .anyMatch(t -> "COLUMNS".equalsIgnoreCase(t));
+                }
+            }
+        } catch (final Throwable ignore) {
+            // ignore
+        }
+        
+        // 字符串兜底：从原 SQL 判断（你们场景就是这一条）
+        try {
+            String rawSql = queryContext.getSql();
+            if (null == rawSql) {
+                return false;
+            }
+            return INFO_SCHEMA_COLUMNS_PATTERN.matcher(rawSql).find();
+        } catch (final Throwable ignore) {
+            return false;
+        }
+    }
+    
+    private String parseTableSchemaFromSql(final String sql) {
+        Matcher m = TABLE_SCHEMA_PATTERN.matcher(sql);
+        if (m.find()) {
+            return m.group(1);
+        }
+        return null;
+    }
+    
+    private String escapeBackticks(final String s) {
+        return null == s ? null : s.replace("`", "``");
+    }
+    
+    private Collection<SQLException> closeConnections() {
+        Collection<SQLException> result = new LinkedList<>();
+        for (Connection each : cachedConnections) {
+            try {
+                each.close();
+            } catch (final SQLException ex) {
+                result.add(ex);
+            }
+        }
+        cachedConnections.clear();
+        return result;
+    }
+    
 }
