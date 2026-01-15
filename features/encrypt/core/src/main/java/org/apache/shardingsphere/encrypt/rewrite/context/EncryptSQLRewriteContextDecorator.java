@@ -20,10 +20,12 @@ package org.apache.shardingsphere.encrypt.rewrite.context;
 import org.apache.shardingsphere.encrypt.constant.EncryptOrder;
 import org.apache.shardingsphere.encrypt.rewrite.condition.EncryptCondition;
 import org.apache.shardingsphere.encrypt.rewrite.condition.EncryptConditionEngine;
+import org.apache.shardingsphere.encrypt.rewrite.condition.EncryptProjectionConditionEngine;
 import org.apache.shardingsphere.encrypt.rewrite.parameter.EncryptParameterRewriterBuilder;
 import org.apache.shardingsphere.encrypt.rewrite.token.EncryptTokenGenerateBuilder;
 import org.apache.shardingsphere.encrypt.rule.EncryptRule;
 import org.apache.shardingsphere.infra.binder.statement.SQLStatementContext;
+import org.apache.shardingsphere.infra.binder.statement.dml.SelectStatementContext;
 import org.apache.shardingsphere.infra.binder.type.WhereAvailable;
 import org.apache.shardingsphere.infra.config.props.ConfigurationProperties;
 import org.apache.shardingsphere.infra.rewrite.context.SQLRewriteContext;
@@ -36,6 +38,7 @@ import org.apache.shardingsphere.sql.parser.sql.common.segment.dml.predicate.Whe
 
 import java.util.Collection;
 import java.util.Collections;
+import java.util.LinkedList;
 
 /**
  * SQL rewrite context decorator for encrypt.
@@ -48,7 +51,8 @@ public final class EncryptSQLRewriteContextDecorator implements SQLRewriteContex
         if (!containsEncryptTable(encryptRule, sqlStatementContext)) {
             return;
         }
-        Collection<EncryptCondition> encryptConditions = createEncryptConditions(encryptRule, sqlRewriteContext);
+        Collection<EncryptCondition> encryptConditions = new LinkedList<>(createEncryptConditions(encryptRule, sqlRewriteContext));
+        encryptConditions.addAll(createProjectionEncryptConditions(encryptRule, sqlRewriteContext));
         if (!sqlRewriteContext.getParameters().isEmpty()) {
             Collection<ParameterRewriter> parameterRewriters = new EncryptParameterRewriterBuilder(encryptRule,
                     sqlRewriteContext.getDatabaseName(), sqlRewriteContext.getSchemas(), sqlStatementContext, encryptConditions).getParameterRewriters();
@@ -68,6 +72,15 @@ public final class EncryptSQLRewriteContextDecorator implements SQLRewriteContex
         Collection<ColumnSegment> columnSegments = ((WhereAvailable) sqlStatementContext).getColumnSegments();
         return new EncryptConditionEngine(encryptRule, sqlRewriteContext.getSchemas())
                 .createEncryptConditions(whereSegments, columnSegments, sqlStatementContext, sqlRewriteContext.getDatabaseName());
+    }
+    
+    private Collection<EncryptCondition> createProjectionEncryptConditions(final EncryptRule encryptRule, final SQLRewriteContext sqlRewriteContext) {
+        SQLStatementContext sqlStatementContext = sqlRewriteContext.getSqlStatementContext();
+        if (!(sqlStatementContext instanceof SelectStatementContext)) {
+            return Collections.emptyList();
+        }
+        return new EncryptProjectionConditionEngine(encryptRule, sqlRewriteContext.getSchemas())
+                .createEncryptConditions((SelectStatementContext) sqlStatementContext, sqlRewriteContext.getDatabaseName());
     }
     
     private boolean containsEncryptTable(final EncryptRule encryptRule, final SQLStatementContext sqlStatementContext) {
